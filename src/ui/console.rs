@@ -107,15 +107,16 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     } else {
         ("No device opened".to_owned(), theme::ERROR_TEXT)
     };
-    // The research root is fixed at build time, so the only fact worth
-    // reporting beyond the path is whether it is actually there.
-    let research = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|parent| parent.join("localflow-research"));
-    let (research, research_color) = match research {
-        Some(path) if path.is_dir() => (path.display().to_string(), theme::MUTED),
-        Some(path) => (format!("{} (not found)", path.display()), theme::ERROR_TEXT),
-        None => ("unknown".to_owned(), theme::ERROR_TEXT),
+    // Ask the router how it resolved the research root, and let it decide what
+    // counts as present, rather than recomputing either here. Validating with a
+    // local is_dir() used to let this row read healthy at the same moment the
+    // worker row reported the runtime missing.
+    let (research, research_color) = match crate::router::research_root() {
+        Ok(path) => match crate::router::runtime_paths(&path) {
+            Ok(_) => (path.display().to_string(), theme::MUTED),
+            Err(err) => (err.to_string(), theme::ERROR_TEXT),
+        },
+        Err(err) => (err.to_string(), theme::ERROR_TEXT),
     };
     egui::Grid::new("status").num_columns(2).spacing([18.0, 10.0]).show(ui, |ui| {
         row(ui, "Hotkey", &hotkey.0, hotkey.1);

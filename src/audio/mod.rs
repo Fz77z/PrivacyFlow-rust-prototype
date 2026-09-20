@@ -19,15 +19,21 @@ const MAX_RECORDING_SECONDS: usize = 120;
 /// same gain.
 const TARGET_BUFFER_FRAMES: u32 = 128;
 
-/// A microphone opened once and then kept open, paused, for the lifetime of
-/// the application.
+/// A microphone opened once and then kept open for the lifetime of the
+/// application.
 ///
 /// Opening the device and building the stream costs over a hundred
 /// milliseconds, and doing that when the hotkey is pressed spends it out of
 /// the first moments of speech. Paying it once at startup means a keypress
-/// only has to restart an already-built stream. The stream is paused whenever
-/// LocalFlow is not recording, so the microphone is not live between
-/// dictations.
+/// only has to restart an already-built stream.
+///
+/// The stream is paused whenever LocalFlow is not recording, so the
+/// microphone is not live between dictations, and it is not live before the
+/// first one either. That last part takes an explicit pause: cpal's CoreAudio
+/// backend calls `AudioOutputUnitStart` inside `build_input_stream`, so a
+/// freshly built stream is already running. Pausing it at the end of `open`
+/// stops the IO while leaving the AudioUnit open and initialised, which is
+/// the whole point of opening early.
 pub struct Microphone {
     stream: cpal::Stream,
     /// Only the pipeline thread ever locks this. The audio callback holds the
@@ -117,6 +123,13 @@ impl Microphone {
             )?,
             other => return Err(anyhow!("Unsupported microphone sample format: {other:?}")),
         };
+
+        // cpal starts the unit as part of building the stream. Stop the IO
+        // again immediately: the device stays open, but nothing is captured
+        // until the first keypress...
+        stream
+            .pause()
+            .context("Could not pause the microphone stream after opening it")?;
 
         Ok(Self {
             stream,

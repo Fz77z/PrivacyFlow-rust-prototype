@@ -68,9 +68,9 @@ impl LocalFlowApp {
                     )
                 }
             };
-        // The microphone is opened once, here, and left paused. A keypress then
-        // only has to restart it, instead of spending device setup out of the
-        // first moments of speech...
+        // The microphone is opened once, here, so a keypress only has to
+        // restart an already-built stream instead of spending device setup out
+        // of the first moments of speech...
         let (microphone, microphone_error) = match Microphone::open() {
             Ok(microphone) => (Some(microphone), None),
             Err(error) => (

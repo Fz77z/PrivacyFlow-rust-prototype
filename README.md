@@ -40,11 +40,33 @@ cargo run --release
 If the converted model is missing, the worker says so at startup and names that script rather than falling back to another engine.
 
 Grant LocalFlow microphone, Accessibility, and Input Monitoring permissions when macOS asks.
-The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup and then left paused.
-It is resumed only while you hold the hotkey, so the microphone is not live between dictations.
-Opening the device costs over a hundred milliseconds, and paying that on each keypress used to come out of the first moments of speech. Then focus an editable application, hold Right Option while speaking, and release it.
+The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup.
+Opening the device costs over a hundred milliseconds, and paying that on each keypress used to come out of the first moments of speech.
+The stream is paused as soon as it is opened and resumed only while you hold the hotkey, so the microphone is not live between dictations, or before the first one.
+Then focus an editable application, hold Right Option while speaking, and release it.
 
 The worker sets `HF_HUB_OFFLINE=1`; it does not download models or send dictated content over the network. Captured WAV audio is temporary and is removed after inference.
+
+## Install as an app
+
+LocalFlow can be built as a normal macOS application:
+
+```sh
+./scripts/build-app.sh
+```
+
+This installs `/Applications/LocalFlow.app`.
+
+Installing to a fixed location matters more than it looks.
+macOS grants Accessibility, Input Monitoring and Microphone permission per executable, so a binary that moves is treated as a different application and has to be granted them again.
+Installing to a stable path is what gives the app a stable identity to grant those permissions to.
+
+The app has no Dock icon by design.
+It is a floating widget, so it is quit from the capsule's right-click menu or from the console window.
+
+The app still expects the research checkout at `~/Desktop/localflow-research`.
+Set `LOCALFLOW_RESEARCH_ROOT` if it lives somewhere else.
+If the runtime is missing, the console names the exact path that was searched and the file that was not found.
 
 ## Insertion behavior
 

@@ -62,14 +62,7 @@ pub struct KevWorker {
 impl KevWorker {
     pub fn start() -> Result<Self> {
         let research = research_root()?;
-        let python = research.join(".venv-kev/bin/python");
-        let script = research.join("scripts/localflow_worker.py");
-        if !python.is_file() || !script.is_file() {
-            return Err(anyhow!(
-                "LocalFlow research runtime is unavailable at {}",
-                research.display()
-            ));
-        }
+        let (python, script) = runtime_paths(&research)?;
 
         let mut child = Command::new(python)
             .arg(script)
@@ -260,12 +253,49 @@ impl Drop for KevWorker {
     }
 }
 
-fn research_root() -> Result<PathBuf> {
-    let app_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let parent = app_root
-        .parent()
-        .ok_or_else(|| anyhow!("LocalFlow has no parent directory"))?;
-    Ok(parent.join("localflow-research"))
+/// Where the sibling research checkout lives.
+///
+/// This was once resolved with `env!("CARGO_MANIFEST_DIR")`, which the
+/// compiler bakes in as the directory the binary was built in. That worked
+/// only while LocalFlow ran from its own checkout, and broke silently the
+/// moment either the app or the research repository moved.
+pub(crate) fn research_root() -> Result<PathBuf> {
+    let override_path = std::env::var_os("LOCALFLOW_RESEARCH_ROOT").map(PathBuf::from);
+    resolve_research_root(override_path, dirs::home_dir())
+}
+
+/// The resolution itself, kept free of the environment so it can be tested.
+fn resolve_research_root(
+    override_path: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path);
+    }
+    let home =
+        home.ok_or_else(|| anyhow!("LocalFlow could not determine the macOS home directory"))?;
+    Ok(home.join("Desktop").join("localflow-research"))
+}
+
+/// The two files LocalFlow requires from the research checkout. This is a
+/// contract with that project: if either moves, LocalFlow must say so
+/// clearly rather than starting a worker that cannot run.
+pub(crate) fn runtime_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
+    let python = root.join(".venv-kev/bin/python");
+    let script = root.join("scripts/localflow_worker.py");
+    for (path, relative) in [
+        (&python, ".venv-kev/bin/python"),
+        (&script, "scripts/localflow_worker.py"),
+    ] {
+        if !path.is_file() {
+            return Err(anyhow!(
+                "LocalFlow could not find {relative} in the research runtime at {}. \
+                 Set LOCALFLOW_RESEARCH_ROOT if the checkout is somewhere else.",
+                root.display()
+            ));
+        }
+    }
+    Ok((python, script))
 }
 
 #[cfg(test)]
@@ -363,6 +393,88 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Route::PassThrough).unwrap(),
             "\"PASS_THROUGH\""
+        );
+    }
+
+    /// The compile-time path was correct only while the binary ran from the
+    /// checkout that built it. A bundle in /Applications must resolve its
+    /// runtime by asking, not by remembering where it was compiled.
+    #[test]
+    fn an_explicit_override_wins_over_the_default() {
+        let resolved = resolve_research_root(
+            Some(PathBuf::from("/tmp/elsewhere")),
+            Some(PathBuf::from("/Users/someone")),
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/elsewhere"));
+    }
+
+    #[test]
+    fn without_an_override_the_runtime_is_found_beside_the_user_desktop() {
+        let resolved =
+            resolve_research_root(None, Some(PathBuf::from("/Users/someone"))).unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/Users/someone/Desktop/localflow-research")
+        );
+    }
+
+    /// The other tests exercise the pure resolver. This one exercises
+    /// `research_root` itself, which is the only place the variable's name and
+    /// the decision to ask the environment rather than bake in a build-time
+    /// path actually live. Reverting that body to `env!("CARGO_MANIFEST_DIR")`,
+    /// or typoing the name, breaks the documented override in README and is
+    /// invisible to every other test here.
+    ///
+    /// `set_var` mutates process-global state and Rust runs tests in the same
+    /// process, so this is only safe while no other test reads or writes an
+    /// environment variable. None does today. Check that before adding one.
+    #[test]
+    fn the_documented_override_variable_is_the_one_actually_read() {
+        std::env::set_var("LOCALFLOW_RESEARCH_ROOT", "/tmp/override-probe");
+        let resolved = research_root();
+        std::env::remove_var("LOCALFLOW_RESEARCH_ROOT");
+        assert_eq!(resolved.unwrap(), PathBuf::from("/tmp/override-probe"));
+    }
+
+    /// Failing without a home directory is better than guessing at one.
+    #[test]
+    fn no_home_directory_is_an_explicit_failure() {
+        let error = resolve_research_root(None, None).unwrap_err().to_string();
+        assert!(
+            error.contains("home directory"),
+            "error should say what could not be determined, got: {error}"
+        );
+    }
+
+    /// A wrong path used to produce a worker that could not start, with nothing
+    /// saying where LocalFlow had looked. The message must name the file, and
+    /// it must name the right one: both entries of the contract are checked,
+    /// because a regression that reported the wrong `relative` string would be
+    /// invisible if only one arm were exercised.
+    #[test]
+    fn a_missing_runtime_file_is_named_in_the_error() {
+        let dir = std::env::temp_dir().join(format!("localflow-root-{}", std::process::id()));
+        // Removed before every assertion, so a failing one cannot leak it...
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".venv-kev/bin")).unwrap();
+
+        let missing_python = runtime_paths(&dir).unwrap_err().to_string();
+        std::fs::write(dir.join(".venv-kev/bin/python"), b"#!/bin/sh\n").unwrap();
+        let missing_script = runtime_paths(&dir).unwrap_err().to_string();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            missing_python.contains(".venv-kev/bin/python"),
+            "error should name the missing interpreter, got: {missing_python}"
+        );
+        assert!(
+            missing_script.contains("scripts/localflow_worker.py"),
+            "error should name the missing file, got: {missing_script}"
+        );
+        assert!(
+            missing_script.contains(&dir.display().to_string()),
+            "error should name the root it searched, got: {missing_script}"
         );
     }
 }
