@@ -36,6 +36,15 @@ Grant LocalFlow microphone, Accessibility, and Input Monitoring permissions when
 
 The worker sets `HF_HUB_OFFLINE=1`; it does not download models or send dictated content over the network. Captured WAV audio is temporary and is removed after inference.
 
+## Insertion behavior
+
+Insertion puts the transcript on the system pasteboard and synthesizes Cmd-V.
+
+The transcript is left on the pasteboard afterwards.
+Restoring the previous clipboard on a timer raced the target application's asynchronous paste handling, which could insert the older clipboard contents instead of the dictated text.
+
+LocalFlow records which application was frontmost when dictation started and refuses to insert if a different application is frontmost when the text is ready.
+
 ## Current scope
 
 Only `PASS_THROUGH` is inserted. A non-PASS route is shown as an explicit error rather than being sent through the earlier placeholder cleanup logic. `LIGHT_CLEANUP`, `TRANSFORM`, and `COMPLEX` are intentionally deferred until their real local processor is connected.

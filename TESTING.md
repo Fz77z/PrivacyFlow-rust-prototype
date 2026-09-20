@@ -64,6 +64,10 @@ Do not add broad mock stacks or benchmark/model initialization to the normal sui
 - Starting a new recording clears stale transcript, output, route, and error state.
 - Kev’s JSONL route names match the application-worker protocol.
 - The worker protocol preserves Kev's four route names.
+- Holding the left Option key does not mask the right Option key's release, which would otherwise leave the microphone recording indefinitely.
+- The audio callback downmixes to mono without taking a lock or allocating on the real-time thread.
+- A second instance cannot take the lock, because two instances would install two HID event taps and race to paste.
+- A worker that stops answering fails the utterance explicitly and fails every later utterance immediately, instead of blocking the pipeline thread forever.
 
 The existing research project owns batch lifecycle. Its `test_burned_batch_rejects_a_record_before_it_reaches_the_log` protects the high-severity burn invariant and should be run when touching `localflow-research/src/dictation_router/shadow.py`:
 

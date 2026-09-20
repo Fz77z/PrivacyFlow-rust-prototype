@@ -18,8 +18,8 @@ fn main() -> eframe::Result<()> {
     }
     let _instance_lock = match instance::InstanceLock::acquire(&data_dir.join("localflow.lock")) {
         Ok(lock) => lock,
-        Err(_) => {
-            eprintln!("LocalFlow is already running; refusing to start a second input listener.");
+        Err(error) => {
+            eprintln!("LocalFlow will not start: {error:#}");
             return Ok(());
         }
     };
