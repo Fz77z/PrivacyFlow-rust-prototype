@@ -64,15 +64,14 @@ fi
 echo
 echo "Certificate created."
 echo
-echo "One step is left and it needs your login password, so it cannot be"
-echo "done unattended. Run this yourself:"
+echo "The first build will show a keychain dialog asking whether codesign"
+echo "may use the new key. Choose Always Allow, not Allow: that records the"
+echo "permission once, and later builds go through silently."
 echo
-echo "  security set-key-partition-list -S apple-tool:,apple:,codesign: \\"
-echo "      -s -l \"$COMMON_NAME\" \"$KEYCHAIN\""
-echo
-echo "It grants codesign standing permission to use the new key. Skip it and"
-echo "every build stops on a keychain dialog instead, which works but is"
-echo "tedious. Answer it with your Mac login password."
+echo "It is tempting to pre-authorise this with set-key-partition-list, but"
+echo "matching the key by label does not work after a PKCS12 import, and"
+echo "matching it by capability would rewrite the access list of every"
+echo "signing key in your keychain. One dialog is the smaller price."
 echo
 echo "Then rebuild with ./scripts/build-app.sh and grant LocalFlow its"
 echo "permissions one final time. They will survive rebuilds after that."
