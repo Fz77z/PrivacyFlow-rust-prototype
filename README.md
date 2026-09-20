@@ -33,7 +33,10 @@ The research runtime and the already-downloaded Whisper model are used without c
 cargo run --release
 ```
 
-Grant LocalFlow microphone, Accessibility, and Input Monitoring permissions when macOS asks. Then focus an editable application, hold Right Option while speaking, and release it.
+Grant LocalFlow microphone, Accessibility, and Input Monitoring permissions when macOS asks.
+The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup and then left paused.
+It is resumed only while you hold the hotkey, so the microphone is not live between dictations.
+Opening the device costs over a hundred milliseconds, and paying that on each keypress used to come out of the first moments of speech. Then focus an editable application, hold Right Option while speaking, and release it.
 
 The worker sets `HF_HUB_OFFLINE=1`; it does not download models or send dictated content over the network. Captured WAV audio is temporary and is removed after inference.
 

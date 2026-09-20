@@ -1,4 +1,4 @@
-use crate::audio::{CapturedAudio, Recorder};
+use crate::audio::{CapturedAudio, Microphone};
 use crate::platform::{frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent};
 use crate::router::{KevWorker, RouteResult};
 use crate::state::{dur_ms, AppState, HudState, RecordingState, Timings};
@@ -27,7 +27,7 @@ struct WorkResult {
 
 pub struct LocalFlowApp {
     state: AppState,
-    recorder: Option<Recorder>,
+    microphone: Option<Microphone>,
     hotkey_events: HotkeyReceiver<HotkeyEvent>,
     _hotkey: GlobalHotkey,
     work_tx: Sender<WorkItem>,
@@ -53,8 +53,15 @@ impl LocalFlowApp {
                     )
                 }
             };
+        // The microphone is opened once, here, and left paused. A keypress then
+        // only has to restart it, instead of spending device setup out of the
+        // first moments of speech...
+        let (microphone, microphone_error) = match Microphone::open() {
+            Ok(microphone) => (Some(microphone), None),
+            Err(error) => (None, Some(format!("Microphone unavailable: {error:#}"))),
+        };
         let mut state = AppState::default();
-        if let Some(error) = hotkey_error {
+        if let Some(error) = hotkey_error.or(microphone_error) {
             state.hud = HudState::Error;
             state.last_error = Some(error);
         }
@@ -65,7 +72,7 @@ impl LocalFlowApp {
         start_pipeline_worker(work_rx, result_tx, audio_dir.clone());
         Self {
             state,
-            recorder: None,
+            microphone,
             hotkey_events,
             _hotkey: hotkey,
             work_tx,
@@ -77,7 +84,7 @@ impl LocalFlowApp {
     }
 
     fn start_recording(&mut self) {
-        if self.recorder.is_some() || self.state.recording != RecordingState::Idle {
+        if self.state.recording != RecordingState::Idle {
             return;
         }
         if self.state.debug_open {
@@ -91,29 +98,35 @@ impl LocalFlowApp {
             self.fail("Focus the destination text field before dictating".to_owned());
             return;
         }
-        self.state.reset_for_recording();
-        match Recorder::start() {
-            Ok(recorder) => {
-                self.target_pid = target_pid;
-                self.recording_started = Some(Instant::now());
-                self.recorder = Some(recorder);
-            }
-            Err(error) => self.fail(error.to_string()),
+        let Some(microphone) = &self.microphone else {
+            self.fail("The microphone is unavailable; restart LocalFlow".to_owned());
+            return;
+        };
+        // The stream was built at startup, so this only restarts it. Opening
+        // the device here would cost over a hundred milliseconds of speech...
+        if let Err(error) = microphone.start_recording() {
+            self.fail(error.to_string());
+            return;
         }
+        self.state.reset_for_recording();
+        self.target_pid = target_pid;
+        self.recording_started = Some(Instant::now());
     }
 
     fn finish_recording(&mut self) {
-        let Some(recorder) = self.recorder.take() else {
+        if self.recording_started.take().is_none() {
+            return;
+        }
+        let Some(microphone) = &self.microphone else {
             return;
         };
-        self.recording_started = None;
         self.state.recording = RecordingState::Processing;
         self.state.hud = HudState::Processing;
         let speech_finished = Instant::now();
         // Only the microphone stream is stopped here. Draining the capture
         // buffer and encoding the WAV happen on the pipeline thread, so
         // releasing the hotkey never janks the HUD or delays the next press...
-        match recorder.stop() {
+        match microphone.stop_recording() {
             Ok(captured) => {
                 if self
                     .work_tx
@@ -250,9 +263,11 @@ impl eframe::App for LocalFlowApp {
             .recording_started
             .is_some_and(|started| started.elapsed() >= MAX_RECORDING_DURATION)
         {
-            // Drop the stream without writing a WAV. This bounds memory use even
-            // if macOS or a modifier-key edge case loses the release event.
-            self.recorder.take();
+            // Pause without writing a WAV. This bounds memory use even if macOS
+            // or a modifier-key edge case loses the release event.
+            if let Some(microphone) = &self.microphone {
+                let _ = microphone.stop_recording();
+            }
             self.recording_started = None;
             self.target_pid = None;
             self.fail("Recording stopped after two minutes; please dictate again".to_owned());
@@ -267,8 +282,10 @@ impl eframe::App for LocalFlowApp {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
-        if let Some(recorder) = &self.recorder {
-            self.state.mic_level = recorder.level();
+        if self.recording_started.is_some() {
+            if let Some(microphone) = &self.microphone {
+                self.state.mic_level = microphone.level();
+            }
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         if self.state.hud == HudState::Processing {
