@@ -11,9 +11,21 @@ use std::time::Duration;
 /// bounded. Past this the worker is wedged rather than starting.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Generous upper bound for transcribing and routing one utterance, which the
-/// recorder already caps at two minutes of audio.
-const INFERENCE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The fixed part of one utterance's budget: request framing, model dispatch,
+/// the routing decision, and an S1-mini rewrite, none of which grow with the
+/// length of the audio.
+const INFERENCE_BASE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The part that does grow with the audio. Transcription runs many times
+/// faster than real time, so this is deliberately loose: the timeout exists to
+/// catch a wedged worker, and a flat bound would let a merely slow machine
+/// look identical to one and kill an otherwise healthy process.
+const INFERENCE_TIMEOUT_PER_AUDIO_SECOND: u32 = 4;
+
+/// How long one utterance may take before the worker counts as wedged.
+fn inference_timeout(audio: Duration) -> Duration {
+    INFERENCE_BASE_TIMEOUT + audio * INFERENCE_TIMEOUT_PER_AUDIO_SECOND
+}
 
 #[derive(Debug, Clone)]
 pub struct RouteResult {
@@ -26,7 +38,11 @@ pub struct InferenceResult {
     pub transcript: String,
     pub asr_ms: u128,
     pub route: RouteResult,
-    pub shadow_warning: Option<String>,
+    /// The text the route produced, which is the raw transcript for
+    /// `PASS_THROUGH` and the processor's rewrite for a processed route.
+    pub output: String,
+    /// Set only when a route actually ran a text processor.
+    pub processing_ms: Option<u128>,
 }
 
 /// The resident bridge to the exact research setup: mlx-whisper large-v3-turbo
@@ -114,19 +130,16 @@ impl KevWorker {
         Ok(worker)
     }
 
-    pub fn transcribe_and_route(&mut self, audio_path: &Path) -> Result<InferenceResult> {
+    /// `audio_duration` sizes this request's wedge timeout; it is not used for
+    /// anything the worker decides.
+    pub fn transcribe_and_route(
+        &mut self,
+        audio_path: &Path,
+        audio_duration: Duration,
+    ) -> Result<InferenceResult> {
         #[derive(Serialize)]
         struct Request<'a> {
             audio_path: &'a str,
-        }
-        #[derive(Deserialize)]
-        struct Response {
-            transcript: Option<String>,
-            asr_ms: Option<f64>,
-            route: Option<Route>,
-            router_ms: Option<f64>,
-            shadow_error: Option<String>,
-            error: Option<String>,
         }
 
         if let Some(reason) = &self.fatal {
@@ -140,34 +153,11 @@ impl KevWorker {
                 "The inference worker stopped accepting audio: {error}"
             )));
         }
-        let line = self.read_response(INFERENCE_TIMEOUT, "while transcribing")?;
+        let line = self.read_response(inference_timeout(audio_duration), "while transcribing")?;
 
-        // A JSON error is a per-utterance failure the worker recovers from, so
-        // it must not poison the still-healthy resident process...
-        let response: Response =
-            serde_json::from_str(&line).context("Inference worker sent invalid JSON")?;
-        if let Some(error) = response.error {
-            return Err(anyhow!(error));
-        }
-        Ok(InferenceResult {
-            transcript: response
-                .transcript
-                .ok_or_else(|| anyhow!("Inference worker omitted transcript"))?,
-            asr_ms: response
-                .asr_ms
-                .ok_or_else(|| anyhow!("Inference worker omitted ASR latency"))?
-                .round() as u128,
-            route: RouteResult {
-                route: response
-                    .route
-                    .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
-                elapsed_ms: response
-                    .router_ms
-                    .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
-                    .round() as u128,
-            },
-            shadow_warning: response.shadow_error,
-        })
+        // A per-utterance failure is reported in the response itself and
+        // leaves the resident worker healthy, so it must not poison it...
+        parse_response(&line)
     }
 
     fn write_request<T: Serialize>(&mut self, request: &T) -> std::io::Result<()> {
@@ -199,6 +189,69 @@ impl KevWorker {
         self.fatal = Some(reason);
         error
     }
+}
+
+/// One JSONL reply from the worker. Every field is optional on the wire so
+/// that a malformed reply is reported as a missing field rather than as a
+/// parse failure that says nothing about what was wrong.
+#[derive(Deserialize)]
+struct Response {
+    transcript: Option<String>,
+    asr_ms: Option<f64>,
+    route: Option<Route>,
+    router_ms: Option<f64>,
+    output: Option<String>,
+    processor: Option<String>,
+    processing_ms: Option<f64>,
+    error: Option<String>,
+}
+
+/// Turn one worker reply into the result the pipeline inserts.
+///
+/// This is the whole contract between the Python worker and the application,
+/// so it is kept separate from the transport in order to stay testable.
+fn parse_response(line: &str) -> Result<InferenceResult> {
+    let response: Response =
+        serde_json::from_str(line).context("Inference worker sent invalid JSON")?;
+    if let Some(error) = response.error {
+        return Err(anyhow!(error));
+    }
+
+    // A processor name is what distinguishes a rewritten route from a
+    // pass-through, so its latency is only reported when one actually ran.
+    let processed_by = response.processor.unwrap_or_default();
+    let processing_ms = if processed_by.is_empty() {
+        None
+    } else {
+        Some(
+            response
+                .processing_ms
+                .ok_or_else(|| anyhow!("Inference worker omitted processing latency"))?
+                .round() as u128,
+        )
+    };
+    Ok(InferenceResult {
+        transcript: response
+            .transcript
+            .ok_or_else(|| anyhow!("Inference worker omitted transcript"))?,
+        output: response
+            .output
+            .ok_or_else(|| anyhow!("Inference worker omitted output text"))?,
+        processing_ms,
+        asr_ms: response
+            .asr_ms
+            .ok_or_else(|| anyhow!("Inference worker omitted ASR latency"))?
+            .round() as u128,
+        route: RouteResult {
+            route: response
+                .route
+                .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
+            elapsed_ms: response
+                .router_ms
+                .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
+                .round() as u128,
+        },
+    })
 }
 
 impl Drop for KevWorker {
@@ -253,10 +306,52 @@ mod tests {
         assert!(worker.fatal.is_some());
 
         let after = worker
-            .transcribe_and_route(Path::new("/tmp/never-read.wav"))
+            .transcribe_and_route(Path::new("/tmp/never-read.wav"), Duration::from_secs(3))
             .unwrap_err()
             .to_string();
         assert!(after.contains("Quit and reopen LocalFlow"), "{after}");
+    }
+
+    // Captured verbatim from the real worker, so a change to its reply shape
+    // fails here rather than silently at the moment text is inserted.
+    const PASS_THROUGH_REPLY: &str = r#"{"transcript": "This was written using the dictation.", "asr_ms": 1131.521666000026, "asr_model": "mlx-community/whisper-large-v3-turbo", "route": "PASS_THROUGH", "scores": {"PASS_THROUGH": 1.0}, "router_ms": 133.1131249999089, "rules_route": "PASS_THROUGH", "output": "This was written using the dictation.", "processor": "", "processed": "", "processing_ms": 0.0, "post_asr_ms": 133.97916700023416}"#;
+    const TRANSFORM_REPLY: &str = r#"{"transcript": "Yo yo yo it's your boy", "asr_ms": 1045.2008329998534, "asr_model": "mlx-community/whisper-large-v3-turbo", "route": "TRANSFORM", "scores": {"TRANSFORM": 1.0}, "router_ms": 157.617541000036, "rules_route": "TRANSFORM", "output": "Yo yo yo, it's your boy.", "processor": "superwhisper/s1-mini", "processed": "Yo yo yo, it's your boy.", "processing_ms": 394.2971670003317, "post_asr_ms": 553.1987919998755}"#;
+
+    #[test]
+    fn a_pass_through_reply_inserts_the_raw_transcript_and_reports_no_processing() {
+        let result = parse_response(PASS_THROUGH_REPLY).unwrap();
+        assert_eq!(result.route.route, Route::PassThrough);
+        assert_eq!(result.output, "This was written using the dictation.");
+        assert_eq!(result.output, result.transcript);
+        assert_eq!(result.processing_ms, None);
+    }
+
+    #[test]
+    fn a_processed_reply_inserts_the_rewrite_rather_than_the_transcript() {
+        let result = parse_response(TRANSFORM_REPLY).unwrap();
+        assert_eq!(result.route.route, Route::Transform);
+        assert_eq!(result.transcript, "Yo yo yo it's your boy");
+        assert_eq!(result.output, "Yo yo yo, it's your boy.");
+        assert_eq!(result.processing_ms, Some(394));
+    }
+
+    #[test]
+    fn a_worker_error_reply_is_reported_and_never_produces_text() {
+        let error = parse_response(r#"{"error": "COMPLEX processing is not implemented yet"}"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "COMPLEX processing is not implemented yet");
+    }
+
+    /// The bug this guards: the timeout used to equal the recorder's maximum
+    /// audio length, so transcribing a full two-minute utterance on a slow
+    /// machine could be mistaken for a wedged worker and poison it.
+    #[test]
+    fn the_inference_timeout_always_outgrows_the_audio_it_covers() {
+        for seconds in [0, 1, 30, 120] {
+            let audio = Duration::from_secs(seconds);
+            assert!(inference_timeout(audio) > audio * 2, "{seconds}s of audio");
+        }
     }
 
     #[test]

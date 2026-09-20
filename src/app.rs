@@ -1,21 +1,20 @@
-use crate::audio::{RecordedAudio, Recorder};
+use crate::audio::{CapturedAudio, Recorder};
 use crate::platform::{frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent};
 use crate::router::{KevWorker, RouteResult};
-use crate::state::{dur_ms, AppState, HudState, RecordingState, Route, Timings};
+use crate::state::{dur_ms, AppState, HudState, RecordingState, Timings};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
 const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 
 struct WorkItem {
-    audio: RecordedAudio,
+    captured: CapturedAudio,
     speech_finished: Instant,
     queued_at: Instant,
-    capture_finalize_ms: u128,
     target_pid: Option<i32>,
 }
 struct WorkResult {
@@ -33,7 +32,6 @@ pub struct LocalFlowApp {
     _hotkey: GlobalHotkey,
     work_tx: Sender<WorkItem>,
     result_rx: Receiver<WorkResult>,
-    audio_dir: PathBuf,
     done_at: Option<Instant>,
     recording_started: Option<Instant>,
     target_pid: Option<i32>,
@@ -63,7 +61,8 @@ impl LocalFlowApp {
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let audio_dir = data_dir.join("cache").join("audio");
-        start_pipeline_worker(work_rx, result_tx);
+        sweep_audio_cache(&audio_dir);
+        start_pipeline_worker(work_rx, result_tx, audio_dir.clone());
         Self {
             state,
             recorder: None,
@@ -71,7 +70,6 @@ impl LocalFlowApp {
             _hotkey: hotkey,
             work_tx,
             result_rx,
-            audio_dir,
             done_at: None,
             recording_started: None,
             target_pid: None,
@@ -112,19 +110,17 @@ impl LocalFlowApp {
         self.state.recording = RecordingState::Processing;
         self.state.hud = HudState::Processing;
         let speech_finished = Instant::now();
-        let finalize_started = Instant::now();
-        match recorder.stop_to_wav(&self.audio_dir) {
-            Ok(audio) => {
-                self.state.timings.audio_ms = Some(dur_ms(audio.duration));
-                let capture_finalize_ms = dur_ms(finalize_started.elapsed());
-                self.state.timings.capture_finalize_ms = Some(capture_finalize_ms);
+        // Only the microphone stream is stopped here. Draining the capture
+        // buffer and encoding the WAV happen on the pipeline thread, so
+        // releasing the hotkey never janks the HUD or delays the next press...
+        match recorder.stop() {
+            Ok(captured) => {
                 if self
                     .work_tx
                     .send(WorkItem {
-                        audio,
+                        captured,
                         speech_finished,
                         queued_at: Instant::now(),
-                        capture_finalize_ms,
                         target_pid: self.target_pid.take(),
                     })
                     .is_err()
@@ -219,12 +215,13 @@ impl LocalFlowApp {
                             ui.monospace(&record.output);
                             ui.add_space(6.0);
                             ui.small(format!(
-                                "audio {} · finalize {} · queue {} · ASR {} · router {} · insert {} · total {} ms",
+                                "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
                                 opt_ms(record.timings.audio_ms),
                                 opt_ms(record.timings.capture_finalize_ms),
                                 opt_ms(record.timings.queue_ms),
                                 opt_ms(record.timings.asr_ms),
                                 opt_ms(record.timings.router_ms),
+                                opt_ms(record.timings.transform_ms),
                                 opt_ms(record.timings.insert_ms),
                                 opt_ms(record.timings.total_ms),
                             ));
@@ -301,7 +298,11 @@ impl eframe::App for LocalFlowApp {
     }
 }
 
-fn start_pipeline_worker(work_rx: Receiver<WorkItem>, result_tx: Sender<WorkResult>) {
+fn start_pipeline_worker(
+    work_rx: Receiver<WorkItem>,
+    result_tx: Sender<WorkResult>,
+    audio_dir: PathBuf,
+) {
     std::thread::Builder::new()
         .name("localflow-pipeline".into())
         .spawn(move || {
@@ -309,27 +310,76 @@ fn start_pipeline_worker(work_rx: Receiver<WorkItem>, result_tx: Sender<WorkResu
             // checkpoint once, then remains resident for the app lifetime.
             let mut worker = KevWorker::start().map_err(|error| error.to_string());
             for item in work_rx {
-                let result = process(&mut worker, item);
+                let result = process(&mut worker, &audio_dir, item);
                 let _ = result_tx.send(result);
             }
         })
         .expect("Could not start LocalFlow pipeline worker");
 }
 
-fn process(worker: &mut Result<KevWorker, String>, item: WorkItem) -> WorkResult {
+/// Utterance audio is temporary, but a crash or a force quit leaves the last
+/// WAV behind. The instance lock guarantees no other LocalFlow is running, so
+/// anything still here belongs to a previous run and must not outlive it.
+fn sweep_audio_cache(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No cache directory at all is the ordinary first-run case.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            eprintln!(
+                "LocalFlow could not read its audio cache at {}: {error}",
+                dir.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Err(error) = std::fs::remove_file(&path) {
+            eprintln!(
+                "LocalFlow could not delete leftover audio at {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkItem) -> WorkResult {
     let speech_finished = item.speech_finished;
     let mut timings = Timings {
-        audio_ms: Some(dur_ms(item.audio.duration)),
-        capture_finalize_ms: Some(item.capture_finalize_ms),
         queue_ms: Some(dur_ms(item.queued_at.elapsed())),
         ..Default::default()
     };
     let target_pid = item.target_pid;
+    let finalize_started = Instant::now();
+    let audio = match item.captured.write_wav(audio_dir) {
+        Ok(audio) => audio,
+        Err(error) => {
+            return failed(
+                timings,
+                speech_finished,
+                String::new(),
+                None,
+                String::new(),
+                error.to_string(),
+            )
+        }
+    };
+    timings.capture_finalize_ms = Some(dur_ms(finalize_started.elapsed()));
+    timings.audio_ms = Some(dur_ms(audio.duration));
+
     let inference = match worker {
-        Ok(worker) => worker.transcribe_and_route(&item.audio.path),
+        Ok(worker) => worker.transcribe_and_route(&audio.path, audio.duration),
         Err(error) => Err(anyhow::anyhow!(error.clone())),
     };
-    let _ = std::fs::remove_file(&item.audio.path); // Audio is temporary and is never retained by the app.
+    // Audio is temporary and is never retained by the app, so a failure to
+    // delete it is a broken promise rather than a detail to swallow.
+    if let Err(error) = std::fs::remove_file(&audio.path) {
+        eprintln!(
+            "LocalFlow could not delete {} after transcription: {error}",
+            audio.path.display()
+        );
+    }
     let inference = match inference {
         Ok(value) => value,
         Err(error) => {
@@ -345,25 +395,10 @@ fn process(worker: &mut Result<KevWorker, String>, item: WorkItem) -> WorkResult
     };
     timings.asr_ms = Some(inference.asr_ms);
     timings.router_ms = Some(inference.route.elapsed_ms);
-    if let Some(warning) = inference.shadow_warning {
-        eprintln!(
-            "LocalFlow inserted dictation but did not record its shadow observation: {warning}"
-        );
-    }
 
-    // This milestone intentionally proves the safe vertical slice only. We do
-    // not apply the old placeholder cleanup to a non-PASS utterance.
-    if inference.route.route != Route::PassThrough {
-        return failed(
-            timings,
-            speech_finished,
-            inference.transcript,
-            Some(inference.route),
-            String::new(),
-            "This utterance was not PASS_THROUGH; cleanup and transformation are not wired yet"
-                .to_owned(),
-        );
-    }
+    // The worker decides what each route produces, including refusing an
+    // unimplemented one, so there is a single place that maps route to text.
+    timings.transform_ms = inference.processing_ms;
 
     let target_pid = match target_pid {
         Some(pid) => pid,
@@ -379,7 +414,7 @@ fn process(worker: &mut Result<KevWorker, String>, item: WorkItem) -> WorkResult
         }
     };
     let insert_started = Instant::now();
-    if let Err(error) = insert_text(&inference.transcript, target_pid) {
+    if let Err(error) = insert_text(&inference.output, target_pid) {
         return failed(
             timings,
             speech_finished,
@@ -392,9 +427,9 @@ fn process(worker: &mut Result<KevWorker, String>, item: WorkItem) -> WorkResult
     timings.insert_ms = Some(dur_ms(insert_started.elapsed()));
     timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
     WorkResult {
-        transcript: inference.transcript.clone(),
+        transcript: inference.transcript,
         route_result: Some(inference.route),
-        output: inference.transcript,
+        output: inference.output,
         timings,
         error: None,
     }
@@ -427,4 +462,28 @@ fn install_visuals(ctx: &egui::Context) {
     visuals.window_rounding = egui::Rounding::same(16.0);
     visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(39, 44, 55);
     ctx.set_visuals(visuals);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The promise is that dictation audio never outlives its utterance, and a
+    /// crash is exactly when that promise used to break: nothing deleted the
+    /// WAV the previous run was still holding.
+    #[test]
+    fn startup_deletes_audio_left_behind_by_a_previous_run() {
+        let dir = std::env::temp_dir().join(format!("localflow-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let leftover = dir.join("utterance-20260921T000000.000Z.wav");
+        std::fs::write(&leftover, b"leftover audio").unwrap();
+
+        sweep_audio_cache(&dir);
+        assert!(!leftover.exists(), "leftover audio survived startup");
+
+        // A cache directory that does not exist yet is the first-run case, not
+        // a failure worth reporting.
+        std::fs::remove_dir_all(&dir).unwrap();
+        sweep_audio_cache(&dir);
+    }
 }

@@ -3,8 +3,8 @@
 A macOS-first local dictation app. The current milestone is deliberately narrow:
 
 > Hold **Right Option** → speak → release → mlx-whisper transcribes locally →
-> the exact warmed `pool_300` Kev checkpoint selects `PASS_THROUGH` → text is
-> pasted at the current cursor.
+> the warmed `pool_300` Kev checkpoint picks a route → the text is inserted
+> raw, or rewritten locally by S1-mini first, at the current cursor.
 
 ## What is wired now
 
@@ -12,9 +12,10 @@ LocalFlow uses the existing sibling `../localflow-research` project directly:
 
 - ASR: `mlx-community/whisper-large-v3-turbo` through its existing `mlx-whisper` integration.
 - Router: `experiments/scaling_run/checkpoints/pool_300`, with the same `v3_operational` prompt, fp32 MPS inference, LoRA adapter, and pointer head used by the scaling report.
+- Text processing: `superwhisper/s1-mini`, a 0.6B Qwen3 fine-tune that rewrites a raw ASR transcript as finished written text, run locally through transformers on MPS and kept resident beside the other two models.
 - Research log: the existing `data/shadow/utterances.jsonl` and `data/shadow/BATCHES.json` machinery. It records transcript, Kev route/probabilities/latency, rules prediction, ASR metadata, provenance, and batch.
 
-The resident Python process loads and warms both models once. It is a narrow MVP bridge, not a plugin system or final serving architecture.
+The resident Python process loads and warms all three models once. It is a narrow MVP bridge, not a plugin system or final serving architecture.
 
 ## Run
 
@@ -47,7 +48,16 @@ LocalFlow records which application was frontmost when dictation started and ref
 
 ## Current scope
 
-Only `PASS_THROUGH` is inserted. A non-PASS route is shown as an explicit error rather than being sent through the earlier placeholder cleanup logic. `LIGHT_CLEANUP`, `TRANSFORM`, and `COMPLEX` are intentionally deferred until their real local processor is connected.
+Kev stays strictly a router.
+It answers what kind of processing a transcript needs, and never rewrites text itself.
+
+`PASS_THROUGH` inserts the raw ASR transcript.
+`LIGHT_CLEANUP` and `TRANSFORM` send the transcript through S1-mini and insert its rewrite.
+They remain distinct routes for evaluation even though they currently share one processor.
+`COMPLEX` is intentionally unimplemented and fails with an explicit error rather than falling back to the raw transcript.
+
+A processor failure, or an empty rewrite, is reported as an error.
+LocalFlow never quietly inserts the raw transcript when processing was supposed to happen.
 
 Every successfully transcribed utterance is still written through the existing shadow collector before insertion. A burned batch is rejected before it can be appended; LocalFlow reports the collection problem without silently creating or contaminating an evaluation batch.
 

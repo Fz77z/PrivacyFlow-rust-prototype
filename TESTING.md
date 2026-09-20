@@ -34,6 +34,13 @@ When changing the real worker or shadow integration, also run LocalFlow research
 (cd ../localflow-research && .venv/bin/python -m pytest -q)
 ```
 
+The S1-mini tests load a real 0.6B model and are skipped unless asked for.
+They need `.venv-kev`, which is the environment that has torch and transformers:
+
+```sh
+(cd ../localflow-research && LOCALFLOW_MODEL_TESTS=1 .venv-kev/bin/python -m pytest tests/test_normalizer.py -q)
+```
+
 Vendored model repositories are intentionally excluded from that command: they have independent environments and are DEEP validation, not LocalFlow's normal suite.
 
 ### DEEP VALIDATION — intentional manual acceptance
@@ -68,6 +75,11 @@ Do not add broad mock stacks or benchmark/model initialization to the normal sui
 - The audio callback downmixes to mono without taking a lock or allocating on the real-time thread.
 - A second instance cannot take the lock, because two instances would install two HID event taps and race to paste.
 - A worker that stops answering fails the utterance explicitly and fails every later utterance immediately, instead of blocking the pipeline thread forever.
+- Startup deletes utterance audio that a previous run left behind, so a crash cannot quietly make "audio is temporary" false.
+- The wedge timeout always outgrows the audio it covers, so a slow transcription is never mistaken for a wedged worker and does not poison a healthy one.
+- `PASS_THROUGH` never invokes the text processor.
+- `COMPLEX`, a processor failure, and an empty rewrite each fail explicitly rather than falling back to inserting the raw transcript.
+- S1-mini's control line rejects values outside the sets the model was trained on.
 
 The existing research project owns batch lifecycle. Its `test_burned_batch_rejects_a_record_before_it_reaches_the_log` protects the high-severity burn invariant and should be run when touching `localflow-research/src/dictation_router/shadow.py`:
 

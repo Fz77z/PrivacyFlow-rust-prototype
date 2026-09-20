@@ -104,32 +104,57 @@ impl Recorder {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
-    pub fn stop_to_wav(self, dir: &Path) -> Result<RecordedAudio> {
+    /// Stop the microphone and hand back everything that was captured.
+    ///
+    /// This deliberately does no draining and no encoding: it runs on the UI
+    /// thread the moment the hotkey is released, and the caller finishes the
+    /// recording off that thread.
+    pub fn stop(self) -> Result<CapturedAudio> {
         let Self {
             stream,
-            mut samples,
+            samples,
             sample_rate,
             overflowed,
             ..
         } = self;
-        // Only consume the SPSC buffer after the audio callback has stopped.
+        // The SPSC buffer may only be consumed once the audio callback has
+        // stopped, so the stream is dropped before the consumer escapes.
         drop(stream);
         if overflowed.load(Ordering::Relaxed) {
             return Err(anyhow!(
                 "Recording exceeded the two-minute local audio buffer; no text was sent"
             ));
         }
-        let mut mono = Vec::with_capacity(samples.slots());
-        while let Ok(sample) = samples.pop() {
+        Ok(CapturedAudio {
+            samples,
+            sample_rate,
+        })
+    }
+}
+
+/// A finished recording that has not been drained or encoded yet. It is `Send`
+/// precisely because the microphone stream has already been dropped, which is
+/// what lets the pipeline thread pay for the WAV instead of the UI thread.
+pub struct CapturedAudio {
+    samples: Consumer<f32>,
+    sample_rate: u32,
+}
+
+impl CapturedAudio {
+    /// Drain the capture buffer into a mono 16-bit WAV, which is the only
+    /// format the inference worker accepts.
+    pub fn write_wav(mut self, dir: &Path) -> Result<RecordedAudio> {
+        let mut mono = Vec::with_capacity(self.samples.slots());
+        while let Ok(sample) = self.samples.pop() {
             mono.push(sample);
         }
-        let duration = Duration::from_secs_f64(mono.len() as f64 / sample_rate as f64);
+        let duration = Duration::from_secs_f64(mono.len() as f64 / self.sample_rate as f64);
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
             "utterance-{}.wav",
             chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
         ));
-        write_wav(&path, &mono, sample_rate, 1)?;
+        write_wav(&path, &mono, self.sample_rate, 1)?;
         Ok(RecordedAudio { path, duration })
     }
 }
