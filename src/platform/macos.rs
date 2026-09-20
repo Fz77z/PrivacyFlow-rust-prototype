@@ -7,7 +7,9 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use objc2_app_kit::NSWorkspace;
-use std::sync::atomic::{AtomicBool, Ordering};
+use core_foundation::base::TCFType;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +26,7 @@ fn right_option_is_down(flags: CGEventFlags) -> bool {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
+    fn CGEventTapEnable(tap: *mut c_void, enable: bool);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,18 +68,32 @@ impl GlobalHotkey {
             .name("localflow-hotkey".into())
             .spawn(move || {
                 let run_loop = CFRunLoop::get_current();
+                // Re-enabling a disabled tap needs the tap's own mach port,
+                // and the callback has to exist before the tap does. The
+                // port is published here once the tap is built, and the
+                // callback reads it back. Passing the proxy instead, which
+                // is a different opaque pointer, traps on this machine the
+                // moment macOS disables the tap.
+                let tap_port = Arc::new(AtomicPtr::<c_void>::new(std::ptr::null_mut()));
+                let callback_port = tap_port.clone();
                 let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
                     CGEventTapPlacement::HeadInsertEventTap,
                     CGEventTapOptions::ListenOnly,
                     vec![CGEventType::FlagsChanged],
-                    move |proxy, event_type, event| {
+                    move |_proxy, event_type, event| {
                         if matches!(
                             event_type,
                             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
                         ) {
-                            // Apple requires explicitly re-enabling a tap after a timeout.
-                            unsafe { CGEventTapEnable(proxy, true) };
+                            // Apple requires explicitly re-enabling a tap after
+                            // macOS disables it. The port is null only if this
+                            // somehow fires before the tap finished being built,
+                            // in which case there is nothing to re-enable yet.
+                            let port = callback_port.load(Ordering::Acquire);
+                            if !port.is_null() {
+                                unsafe { CGEventTapEnable(port, true) };
+                            }
                             return None;
                         }
                         if matches!(event_type, CGEventType::FlagsChanged)
@@ -106,6 +122,13 @@ impl GlobalHotkey {
                     ));
                     return;
                 };
+                // Publish the port before the tap starts delivering events, so
+                // a disable arriving immediately still finds something to
+                // re-enable.
+                tap_port.store(
+                    tap.mach_port.as_concrete_TypeRef() as *mut c_void,
+                    Ordering::Release,
+                );
                 // Core Foundation exposes the common-modes constant as an extern static.
                 run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
                 tap.enable();
