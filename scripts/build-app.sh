@@ -35,7 +35,13 @@ cp "$ROOT/target/release/localflow" "$STAGE/Contents/MacOS/localflow"
 ICONSET="$ROOT/target/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
-python3 "$ROOT/bundle/make-icon.py" "$ROOT/target/AppIcon.png"
+# Rendering the icon takes about ten seconds and is deterministic, so it is
+# regenerated only when the generator is newer than its output. Delete
+# target/AppIcon.png to force it.
+if [[ ! -f "$ROOT/target/AppIcon.png" || "$ROOT/bundle/make-icon.py" -nt "$ROOT/target/AppIcon.png" ]]; then
+    echo "Rendering the app icon"
+    python3 "$ROOT/bundle/make-icon.py" "$ROOT/target/AppIcon.png"
+fi
 for size in 16 32 128 256 512; do
     sips -z $size $size "$ROOT/target/AppIcon.png" \
         --out "$ICONSET/icon_${size}x${size}.png" > /dev/null

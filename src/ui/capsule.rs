@@ -17,9 +17,9 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
     let failure = state.last_failure.as_ref().filter(|_| state.hud == HudState::Error);
     let border = match (failure.is_some(), state.hud) {
         (true, _) => theme::ERROR_BORDER,
-        (false, HudState::Listening) => Color32::from_rgb(47, 107, 88),
-        (false, HudState::Processing) => Color32::from_rgb(61, 74, 128),
-        (false, HudState::Done) => Color32::from_rgb(63, 107, 69),
+        (false, HudState::Listening) => theme::BORDER_LISTENING,
+        (false, HudState::Processing) => theme::BORDER_TRANSCRIBING,
+        (false, HudState::Done) => theme::BORDER_INSERTED,
         _ => theme::BORDER,
     };
     painter.rect(
@@ -92,11 +92,11 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         painter.rect_filled(
             icon_rect,
             Rounding::same(theme::ICON_RADIUS),
-            Color32::from_rgb(57, 63, 78),
+            theme::ICON_HOVER,
         );
     }
     let tint = if failure.is_some() || state.unread_failure {
-        Color32::from_rgb(224, 138, 138)
+        theme::ICON_ALERT
     } else {
         theme::ICON_TINT
     };
@@ -106,7 +106,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         // while the user was typing elsewhere is still there to be found.
         let dot = Pos2::new(icon_rect.right() - 8.0, icon_rect.top() + 8.0);
         painter.circle_filled(dot, 4.5, theme::FILL);
-        painter.circle_filled(dot, 3.5, Color32::from_rgb(246, 128, 128));
+        painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
     }
 
     let mut action = None;
@@ -135,26 +135,19 @@ fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {
 /// A window with a title bar and two lines of text: the icon says "opens the
 /// other window" rather than promising settings that do not exist.
 fn paint_console_glyph(painter: &egui::Painter, rect: Rect, tint: Color32) {
-    let glyph = Rect::from_center_size(rect.center(), Vec2::new(19.0, 16.0));
-    let stroke = Stroke::new(1.6, tint);
-    painter.rect_stroke(glyph, Rounding::same(3.4), stroke);
-    let title_y = glyph.top() + 4.6;
-    painter.line_segment(
-        [Pos2::new(glyph.left(), title_y), Pos2::new(glyph.right(), title_y)],
-        stroke,
-    );
-    let inset = 3.4;
-    painter.line_segment(
-        [
-            Pos2::new(glyph.left() + inset, glyph.top() + 8.8),
-            Pos2::new(glyph.left() + inset + 7.0, glyph.top() + 8.8),
-        ],
-        stroke,
-    );
+    // Two shapes, not four. An earlier version drew a title rule and two
+    // content lines inside the same box, and at this size two one point
+    // lines three points apart do not read as two lines, they read as a
+    // grey smudge. One centred rule carries the same meaning legibly.
+    let glyph = Rect::from_center_size(rect.center(), Vec2::new(19.0, 15.0));
+    let stroke = Stroke::new(1.5, tint);
+    painter.rect_stroke(glyph, Rounding::same(4.5), stroke);
+    let rule_y = glyph.center().y;
+    let inset = 4.5;
     painter.line_segment(
         [
-            Pos2::new(glyph.left() + inset, glyph.top() + 12.2),
-            Pos2::new(glyph.left() + inset + 10.0, glyph.top() + 12.2),
+            Pos2::new(glyph.left() + inset, rule_y),
+            Pos2::new(glyph.right() - inset, rule_y),
         ],
         stroke,
     );

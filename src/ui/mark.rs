@@ -70,13 +70,13 @@ fn bars_for(appearance: &Appearance) -> [Bar; 4] {
         // Never lit up: the run did not start.
         FailureKind::Blocked => [Bar::Hollow(theme::ERROR); 4],
         // The input itself is shut, so the bars are dead rather than absent.
-        FailureKind::InputUnavailable => [Bar::Filled(Color32::from_rgb(92, 66, 73)); 4],
+        FailureKind::InputUnavailable => [Bar::Filled(theme::MARK_DEAD); 4],
         // Lit, then dropped - the shape of a lost connection.
         FailureKind::Dropped => [
             Bar::Filled(theme::ERROR),
             Bar::Filled(theme::ERROR),
-            Bar::Hollow(Color32::from_rgb(109, 74, 74)),
-            Bar::Hollow(Color32::from_rgb(109, 74, 74)),
+            Bar::Hollow(theme::MARK_UNLIT),
+            Bar::Hollow(theme::MARK_UNLIT),
         ],
     }
 }

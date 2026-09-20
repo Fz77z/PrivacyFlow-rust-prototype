@@ -11,21 +11,54 @@ pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
 
-pub const FILL: Color32 = Color32::from_rgb(25, 28, 36);
+// The surfaces are a neutral near black. An earlier palette tinted them
+// blue, which quietly fought every other colour in the widget: the greens
+// read as minty, and a desaturated accent laid over them looked muddy
+// rather than subtle. Neutral surfaces let the accents be the only colour
+// in the frame.
+pub const FILL: Color32 = Color32::from_rgb(10, 10, 10);
 /// History cards sit on FILL and must read as raised from it, not as a
 /// different surface, so this is a single step lighter and nothing more.
-pub const CARD_FILL: Color32 = Color32::from_rgb(29, 33, 43);
-pub const BORDER: Color32 = Color32::from_rgb(60, 66, 80);
-pub const IDLE: Color32 = Color32::from_rgb(116, 124, 140);
-pub const LISTENING: Color32 = Color32::from_rgb(113, 218, 178);
-pub const TRANSCRIBING: Color32 = Color32::from_rgb(132, 164, 255);
-pub const INSERTED: Color32 = Color32::from_rgb(151, 224, 157);
+pub const CARD_FILL: Color32 = Color32::from_rgb(20, 20, 20);
+pub const BORDER: Color32 = Color32::from_rgb(38, 38, 38);
+
+// The text greys are neutral for the same reason as the surfaces.
+pub const LABEL: Color32 = Color32::from_rgb(245, 245, 245);
+pub const MUTED: Color32 = Color32::from_rgb(154, 154, 154);
+pub const ICON_TINT: Color32 = Color32::from_rgb(176, 176, 176);
+/// The icon's hover plate. On a near black fill this only has to be a hint
+/// that something is interactive, so it is barely lighter than the capsule.
+pub const ICON_HOVER: Color32 = Color32::from_rgb(35, 35, 35);
+
+// The state accents. These are the only saturated colour in the app, which
+// is why each one has to earn its place rather than being a default hue.
+pub const IDLE: Color32 = Color32::from_rgb(110, 110, 110);
+pub const LISTENING: Color32 = Color32::from_rgb(95, 211, 155);
+pub const TRANSCRIBING: Color32 = Color32::from_rgb(110, 142, 245);
+pub const INSERTED: Color32 = Color32::from_rgb(134, 217, 143);
 pub const ERROR: Color32 = Color32::from_rgb(224, 112, 112);
-pub const ERROR_TEXT: Color32 = Color32::from_rgb(240, 185, 185);
-pub const ERROR_BORDER: Color32 = Color32::from_rgb(109, 54, 54);
-pub const LABEL: Color32 = Color32::from_rgb(243, 245, 249);
-pub const MUTED: Color32 = Color32::from_rgb(157, 165, 181);
-pub const ICON_TINT: Color32 = Color32::from_rgb(177, 185, 201);
+pub const ERROR_TEXT: Color32 = Color32::from_rgb(235, 179, 179);
+
+// Each state tints the capsule's one point border. They are deliberately
+// dark: the border says which state this is to someone already looking,
+// and the mark says it to someone glancing.
+pub const BORDER_LISTENING: Color32 = Color32::from_rgb(42, 95, 72);
+pub const BORDER_TRANSCRIBING: Color32 = Color32::from_rgb(51, 64, 110);
+pub const BORDER_INSERTED: Color32 = Color32::from_rgb(58, 95, 63);
+pub const ERROR_BORDER: Color32 = Color32::from_rgb(92, 46, 46);
+
+// The unread dot and the icon tint that goes with it. The dot is the one
+// thing in the widget allowed to be brighter than its surroundings,
+// because its whole job is to be noticed after the fact.
+pub const ICON_ALERT: Color32 = Color32::from_rgb(224, 138, 138);
+pub const UNREAD_DOT: Color32 = Color32::from_rgb(246, 128, 128);
+
+/// A bar that is present but dead, used for a microphone that cannot be
+/// opened. Dimmed rather than absent, because the input exists and is shut.
+pub const MARK_DEAD: Color32 = Color32::from_rgb(74, 58, 58);
+/// A bar that was never lit, used for the half of the mark that dropped out
+/// when the pipeline lost an utterance it had already captured.
+pub const MARK_UNLIT: Color32 = Color32::from_rgb(107, 71, 71);
 
 /// Named so call sites read as intent rather than as a magic family string.
 pub fn label_font() -> FontId {
