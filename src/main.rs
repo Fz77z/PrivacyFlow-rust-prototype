@@ -26,11 +26,13 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([340.0, 84.0])
-            .with_min_inner_size([340.0, 84.0])
-            .with_always_on_top()
-            .with_decorations(true)
+            .with_inner_size([240.0, 56.0])
+            .with_min_inner_size([240.0, 56.0])
+            .with_max_inner_size([240.0, 56.0])
+            .with_resizable(false)
+            .with_decorations(false)
             .with_transparent(true)
+            .with_always_on_top()
             .with_title("LocalFlow"),
         ..Default::default()
     };

@@ -1,7 +1,7 @@
 use crate::audio::{CapturedAudio, Microphone};
 use crate::platform::{frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent};
 use crate::router::{KevWorker, RouteResult};
-use crate::state::{dur_ms, AppState, HudState, RecordingState, Timings};
+use crate::state::{dur_ms, AppState, Failure, HudState, RecordingState, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -22,7 +22,19 @@ struct WorkResult {
     route_result: Option<RouteResult>,
     output: String,
     timings: Timings,
-    error: Option<String>,
+    /// Which stage failed, categorised where it happened. The pipeline is the
+    /// only thing that knows whether the words were lost to the transcriber or
+    /// to the paste, so the whole failure travels back rather than being
+    /// reconstructed by the UI.
+    failure: Option<Failure>,
+}
+
+/// The pipeline thread's only way of speaking to the UI. Readiness travels
+/// with results so there is a single ordering of everything the UI learns.
+enum PipelineMessage {
+    WorkerReady,
+    WorkerFailed(String),
+    Finished(Box<WorkResult>),
 }
 
 pub struct LocalFlowApp {
@@ -31,10 +43,10 @@ pub struct LocalFlowApp {
     hotkey_events: HotkeyReceiver<HotkeyEvent>,
     _hotkey: GlobalHotkey,
     work_tx: Sender<WorkItem>,
-    result_rx: Receiver<WorkResult>,
-    done_at: Option<Instant>,
+    result_rx: Receiver<PipelineMessage>,
     recording_started: Option<Instant>,
     target_pid: Option<i32>,
+    data_dir: PathBuf,
 }
 
 impl LocalFlowApp {
@@ -49,7 +61,10 @@ impl LocalFlowApp {
                     (
                         GlobalHotkey,
                         events,
-                        Some(format!("Hotkey unavailable: {error:#}")),
+                        Some(Failure::blocked(
+                            "Hotkey unavailable",
+                            format!("Hotkey unavailable: {error:#}"),
+                        )),
                     )
                 }
             };
@@ -58,18 +73,32 @@ impl LocalFlowApp {
         // first moments of speech...
         let (microphone, microphone_error) = match Microphone::open() {
             Ok(microphone) => (Some(microphone), None),
-            Err(error) => (None, Some(format!("Microphone unavailable: {error:#}"))),
+            Err(error) => (
+                None,
+                Some(Failure::input_unavailable(
+                    "Microphone unavailable",
+                    format!("Microphone unavailable: {error:#}"),
+                )),
+            ),
         };
-        let mut state = AppState::default();
-        if let Some(error) = hotkey_error.or(microphone_error) {
-            state.hud = HudState::Error;
-            state.last_error = Some(error);
+        let mut state = AppState {
+            hotkey_installed: hotkey_error.is_none(),
+            microphone_available: microphone.is_some(),
+            ..Default::default()
+        };
+        if let Some(failure) = hotkey_error.or(microphone_error) {
+            // The dot points at the console, so the console has to have
+            // something to show when the user follows it. Clearing the dwell
+            // timer keeps a startup failure on the capsule indefinitely: there
+            // is no working state for it to decay back into...
+            state.record_failure(failure);
+            state.done_at = None;
         }
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
-        start_pipeline_worker(work_rx, result_tx, audio_dir.clone());
+        start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
         Self {
             state,
             microphone,
@@ -77,9 +106,9 @@ impl LocalFlowApp {
             _hotkey: hotkey,
             work_tx,
             result_rx,
-            done_at: None,
             recording_started: None,
             target_pid: None,
+            data_dir,
         }
     }
 
@@ -87,25 +116,25 @@ impl LocalFlowApp {
         if self.state.recording != RecordingState::Idle {
             return;
         }
-        if self.state.debug_open {
-            self.fail(
-                "Close debug, then focus the destination text field before dictating".to_owned(),
-            );
-            return;
-        }
         let target_pid = frontmost_application_pid();
         if target_pid == Some(std::process::id() as i32) || target_pid.is_none() {
-            self.fail("Focus the destination text field before dictating".to_owned());
+            self.fail(Failure::blocked(
+                "No text field focused",
+                "Focus the destination text field before dictating",
+            ));
             return;
         }
         let Some(microphone) = &self.microphone else {
-            self.fail("The microphone is unavailable; restart LocalFlow".to_owned());
+            self.fail(Failure::input_unavailable(
+                "Microphone unavailable",
+                "The microphone is unavailable; restart LocalFlow",
+            ));
             return;
         };
         // The stream was built at startup, so this only restarts it. Opening
         // the device here would cost over a hundred milliseconds of speech...
         if let Err(error) = microphone.start_recording() {
-            self.fail(error.to_string());
+            self.fail(Failure::input_unavailable("Microphone unavailable", error.to_string()));
             return;
         }
         self.state.reset_for_recording();
@@ -138,119 +167,60 @@ impl LocalFlowApp {
                     })
                     .is_err()
                 {
-                    self.fail("The processing worker stopped unexpectedly".to_owned());
+                    self.fail(Failure::dropped(
+                        "Transcription failed",
+                        "The processing worker stopped unexpectedly",
+                    ));
                 }
             }
-            Err(error) => self.fail(error.to_string()),
+            Err(error) => self.fail(Failure::dropped("Recording failed", error.to_string())),
         }
     }
 
     fn receive_results(&mut self) {
-        while let Ok(result) = self.result_rx.try_recv() {
-            self.state.transcript = result.transcript;
-            self.state.route = result.route_result.as_ref().map(|r| r.route);
-            self.state.output = result.output;
-            self.state.timings = result.timings;
-            if let Some(error) = result.error {
-                self.fail(error);
-            } else {
-                self.state.recording = RecordingState::Idle;
-                self.state.hud = HudState::Done;
-                self.state.push_history(None);
-                self.done_at = Some(Instant::now());
+        while let Ok(message) = self.result_rx.try_recv() {
+            match message {
+                PipelineMessage::WorkerReady => self.state.worker = WorkerStatus::Ready,
+                PipelineMessage::WorkerFailed(why) => {
+                    self.state.worker = WorkerStatus::Failed(why);
+                }
+                PipelineMessage::Finished(result) => self.apply_result(*result),
             }
         }
     }
 
-    fn fail(&mut self, message: String) {
-        self.state.recording = RecordingState::Idle;
-        self.state.hud = HudState::Error;
-        self.state.last_error = Some(message.clone());
-        self.state.push_history(Some(message));
-        self.done_at = Some(Instant::now());
-    }
-
-    fn set_debug_open(&mut self, ctx: &egui::Context, open: bool) {
-        self.state.debug_open = open;
-        let size = if open {
-            egui::Vec2::new(640.0, 520.0)
+    /// The pipeline's verdict becomes the capsule's state. This is the only
+    /// transition out of Transcribing, so it either files a finished dictation
+    /// or reports which stage lost it.
+    fn apply_result(&mut self, result: WorkResult) {
+        self.state.transcript = result.transcript;
+        self.state.route = result.route_result.as_ref().map(|r| r.route);
+        self.state.output = result.output;
+        self.state.timings = result.timings;
+        if let Some(failure) = result.failure {
+            self.fail(failure);
         } else {
-            egui::Vec2::new(340.0, 84.0)
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            self.state.recording = RecordingState::Idle;
+            self.state.hud = HudState::Done;
+            self.state.push_history(None);
+            self.state.done_at = Some(Instant::now());
+        }
     }
 
-    fn draw_debug(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let background = ui.max_rect();
-        ui.painter().rect_filled(
-            background,
-            egui::Rounding::ZERO,
-            egui::Color32::from_rgb(25, 28, 36),
-        );
-        let content = background.shrink2(egui::Vec2::new(20.0, 16.0));
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("LocalFlow debug");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new("Quit").min_size(egui::vec2(46.0, 26.0))).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.add(egui::Button::new("← Back").min_size(egui::vec2(66.0, 26.0))).clicked() {
-                        self.set_debug_open(ctx, false);
-                    }
-                });
-            });
-            ui.label(egui::RichText::new("Local-only development information. Audio is deleted after ASR.").small());
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                for record in &self.state.history {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(29, 33, 43))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 66, 80)))
-                        .rounding(egui::Rounding::same(10.0))
-                        .inner_margin(egui::Margin::same(14.0))
-                        .show(ui, |ui| {
-                            ui.set_min_width(560.0);
-                            ui.label(egui::RichText::new(record.timestamp.format("%H:%M:%S").to_string()).strong());
-                            ui.add_space(5.0);
-                            ui.label(egui::RichText::new("ASR").small().strong());
-                            ui.monospace(&record.transcript);
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Route").small().strong());
-                                ui.monospace(record.route.map(|route| route.as_str()).unwrap_or("—"));
-                            });
-                            ui.label(egui::RichText::new("Output").small().strong());
-                            ui.monospace(&record.output);
-                            ui.add_space(6.0);
-                            ui.small(format!(
-                                "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
-                                opt_ms(record.timings.audio_ms),
-                                opt_ms(record.timings.capture_finalize_ms),
-                                opt_ms(record.timings.queue_ms),
-                                opt_ms(record.timings.asr_ms),
-                                opt_ms(record.timings.router_ms),
-                                opt_ms(record.timings.transform_ms),
-                                opt_ms(record.timings.insert_ms),
-                                opt_ms(record.timings.total_ms),
-                            ));
-                            if let Some(error) = &record.error {
-                                ui.add_space(5.0);
-                                ui.colored_label(egui::Color32::LIGHT_RED, error);
-                            }
-                        });
-                    ui.add_space(8.0);
-                }
-            });
-        });
+    fn fail(&mut self, failure: Failure) {
+        self.state.record_failure(failure);
     }
 }
 
 impl eframe::App for LocalFlowApp {
+    /// The capsule paints its own shape into a transparent window, so the
+    /// window itself must contribute nothing. eframe's default clear colour is
+    /// a 70% opaque near-black across the whole viewport, which shows up as a
+    /// rectangle around the capsule's rounded corners.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(event) = self.hotkey_events.try_recv() {
             match event {
@@ -270,14 +240,17 @@ impl eframe::App for LocalFlowApp {
             }
             self.recording_started = None;
             self.target_pid = None;
-            self.fail("Recording stopped after two minutes; please dictate again".to_owned());
+            self.fail(Failure::dropped(
+                "Recording hit 2 min",
+                "Recording stopped after two minutes; please dictate again",
+            ));
         }
-        if let Some(done_at) = self.done_at {
+        if let Some(done_at) = self.state.done_at {
             if done_at.elapsed() > Duration::from_millis(1400)
                 && self.state.hud != HudState::Listening
             {
                 self.state.hud = HudState::Idle;
-                self.done_at = None;
+                self.state.done_at = None;
             } else {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
@@ -292,33 +265,70 @@ impl eframe::App for LocalFlowApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
+        // A console buried behind other windows is exactly when someone
+        // reaches for the menu item, so opening it also raises it.
+        let mut raise_console = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                if self.state.debug_open {
-                    self.draw_debug(ui, ctx);
-                } else if let Some(action) = ui::hud::show(
-                    ui,
-                    self.state.hud,
-                    self.state.mic_level,
-                    self.state.last_error.as_deref(),
-                    ui.input(|i| i.time),
-                ) {
+                if let Some(action) = ui::capsule::show(ui, &self.state, ui.input(|i| i.time)) {
                     match action {
-                        ui::hud::HudAction::ToggleDebug => self.set_debug_open(ctx, true),
-                        ui::hud::HudAction::Close => {
+                        ui::capsule::CapsuleAction::ToggleConsole => {
+                            if self.state.console_open {
+                                self.state.console_open = false;
+                            } else {
+                                self.state.open_console();
+                                raise_console = true;
+                            }
+                        }
+                        // The menu item says "Open console", so it opens one:
+                        // an already-open console is raised rather than shut.
+                        ui::capsule::CapsuleAction::OpenConsole => {
+                            self.state.open_console();
+                            raise_console = true;
+                        }
+                        ui::capsule::CapsuleAction::Quit => {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close)
                         }
                     }
                 }
             });
+
+        if self.state.console_open {
+            let builder = egui::ViewportBuilder::default()
+                .with_title("LocalFlow")
+                .with_inner_size([640.0, 520.0])
+                .with_min_inner_size([520.0, 400.0]);
+            let data_dir = self.data_dir.clone();
+            let state = &mut self.state;
+            // Immediate rather than deferred: a deferred viewport's callback must be
+            // Fn + Send + Sync + 'static, which would force AppState behind a mutex
+            // for no reason other than the signature.
+            let stay_open = ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("console"),
+                builder,
+                move |ctx, _class| {
+                    if raise_console {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    ui::console::show(ctx, state, &data_dir)
+                },
+            );
+            if !stay_open {
+                self.state.console_open = false;
+            }
+        }
     }
 }
 
+/// The UI sleeps when nothing is happening, so the pipeline wakes it after
+/// every message. Without that, a finished dictation sits unread in the
+/// channel and the next hotkey press is swallowed by a stale Processing state.
 fn start_pipeline_worker(
     work_rx: Receiver<WorkItem>,
-    result_tx: Sender<WorkResult>,
+    result_tx: Sender<PipelineMessage>,
     audio_dir: PathBuf,
+    repaint: egui::Context,
 ) {
     std::thread::Builder::new()
         .name("localflow-pipeline".into())
@@ -326,9 +336,19 @@ fn start_pipeline_worker(
             // The Python process loads mlx-whisper and the exact pool_300 Kev
             // checkpoint once, then remains resident for the app lifetime.
             let mut worker = KevWorker::start().map_err(|error| error.to_string());
+            match &worker {
+                Ok(_) => {
+                    let _ = result_tx.send(PipelineMessage::WorkerReady);
+                }
+                Err(error) => {
+                    let _ = result_tx.send(PipelineMessage::WorkerFailed(error.clone()));
+                }
+            }
+            repaint.request_repaint();
             for item in work_rx {
                 let result = process(&mut worker, &audio_dir, item);
-                let _ = result_tx.send(result);
+                let _ = result_tx.send(PipelineMessage::Finished(Box::new(result)));
+                repaint.request_repaint();
             }
         })
         .expect("Could not start LocalFlow pipeline worker");
@@ -378,6 +398,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
                 String::new(),
                 None,
                 String::new(),
+                "Transcription failed",
                 error.to_string(),
             )
         }
@@ -406,6 +427,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
                 String::new(),
                 None,
                 String::new(),
+                "Transcription failed",
                 error.to_string(),
             )
         }
@@ -426,6 +448,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
                 inference.transcript,
                 Some(inference.route),
                 String::new(),
+                "Couldn't insert",
                 "No destination app was focused when dictation started".to_owned(),
             )
         }
@@ -438,6 +461,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
             inference.transcript,
             Some(inference.route),
             String::new(),
+            "Couldn't insert",
             error.to_string(),
         );
     }
@@ -448,7 +472,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         route_result: Some(inference.route),
         output: inference.output,
         timings,
-        error: None,
+        failure: None,
     }
 }
 
@@ -458,6 +482,7 @@ fn failed(
     transcript: String,
     route_result: Option<RouteResult>,
     output: String,
+    headline: &'static str,
     error: String,
 ) -> WorkResult {
     timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
@@ -466,15 +491,20 @@ fn failed(
         route_result,
         output,
         timings,
-        error: Some(error),
+        // Every pipeline failure happens after the user has spoken, so the
+        // kind is settled here: the words did not come back.
+        failure: Some(Failure::dropped(headline, error)),
     }
 }
-fn opt_ms(value: Option<u128>) -> String {
+pub fn opt_ms(value: Option<u128>) -> String {
     value.map(|v| v.to_string()).unwrap_or_else(|| "—".into())
 }
 fn install_visuals(ctx: &egui::Context) {
+    crate::ui::theme::install(ctx);
     let mut visuals = egui::Visuals::dark();
-    visuals.window_fill = egui::Color32::from_rgb(25, 28, 36);
+    // The capsule's right-click menu and its failure tooltip are painted with
+    // this, so it has to be the capsule's own fill rather than a copy of it...
+    visuals.window_fill = crate::ui::theme::FILL;
     visuals.panel_fill = egui::Color32::TRANSPARENT;
     visuals.window_rounding = egui::Rounding::same(16.0);
     visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(39, 44, 55);

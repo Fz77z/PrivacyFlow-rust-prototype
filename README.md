@@ -27,11 +27,17 @@ Desktop/
 └── localflow-research/
 ```
 
-The research runtime and the already-downloaded Whisper model are used without configuration:
+The research runtime and the already-downloaded Whisper model are used without configuration.
+
+One local setup step is needed the first time, which converts S1-mini to the 8-bit MLX build LocalFlow runs.
+It reads the weights already in this machine's Hugging Face cache and downloads nothing:
 
 ```sh
+(cd ../localflow-research && .venv-kev/bin/python scripts/convert_s1_mlx.py)
 cargo run --release
 ```
+
+If the converted model is missing, the worker says so at startup and names that script rather than falling back to another engine.
 
 Grant LocalFlow microphone, Accessibility, and Input Monitoring permissions when macOS asks.
 The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup and then left paused.
@@ -49,6 +55,19 @@ Restoring the previous clipboard on a timer raced the target application's async
 
 LocalFlow records which application was frontmost when dictation started and refuses to insert if a different application is frontmost when the text is ready.
 
+## Interface
+
+LocalFlow shows two windows.
+
+The capsule is a small, frameless, always-on-top pill that shows the current state and, on failure, a short headline.
+It has no title bar and no close button.
+Drag its body to move it, and right-click it for a menu with "Open console" and "Quit LocalFlow".
+Cmd-Q does not quit LocalFlow, because a frameless window has no menu bar for the shortcut to reach; quitting goes through that right-click menu or the console's Quit button instead.
+
+The console is a conventional window, opened from the icon on the capsule's right side, with an Activity tab (dictation history and the full latency breakdown) and a Status tab (hotkey, worker state, model names, and paths).
+It is a separate window from the capsule, so dictation is not blocked while it is open.
+A red dot on the capsule's icon marks an unread failure and clears when the console is opened; hovering the icon shows the full failure message.
+
 ## Current scope
 
 Kev stays strictly a router.
@@ -63,8 +82,6 @@ A processor failure, or an empty rewrite, is reported as an error.
 LocalFlow never quietly inserts the raw transcript when processing was supposed to happen.
 
 Every successfully transcribed utterance is still written through the existing shadow collector before insertion. A burned batch is rejected before it can be appended; LocalFlow reports the collection problem without silently creating or contaminating an evaluation batch.
-
-The debug window shows the ASR transcript, selected route, final output, and latency breakdown.
 
 ## Testing
 
