@@ -68,14 +68,14 @@ fn activity(ui: &mut Ui, state: &AppState) {
                     ui.add_space(6.0);
                     ui.small(format!(
                         "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
-                        crate::app::opt_ms(record.timings.audio_ms),
-                        crate::app::opt_ms(record.timings.capture_finalize_ms),
-                        crate::app::opt_ms(record.timings.queue_ms),
-                        crate::app::opt_ms(record.timings.asr_ms),
-                        crate::app::opt_ms(record.timings.router_ms),
-                        crate::app::opt_ms(record.timings.transform_ms),
-                        crate::app::opt_ms(record.timings.insert_ms),
-                        crate::app::opt_ms(record.timings.total_ms),
+                        opt_ms(record.timings.audio_ms),
+                        opt_ms(record.timings.capture_finalize_ms),
+                        opt_ms(record.timings.queue_ms),
+                        opt_ms(record.timings.asr_ms),
+                        opt_ms(record.timings.router_ms),
+                        opt_ms(record.timings.transform_ms),
+                        opt_ms(record.timings.insert_ms),
+                        opt_ms(record.timings.total_ms),
                     ));
                     // The console keeps the original message, whatever the
                     // capsule had room to say.
@@ -156,6 +156,12 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
             .small()
             .color(theme::MUTED),
     );
+}
+
+/// A latency that was never measured, because the dictation did not reach
+/// that stage, reads as a dash rather than as a zero that claims it was free.
+fn opt_ms(value: Option<u128>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(|| "—".into())
 }
 
 fn row(ui: &mut Ui, label: &str, value: &str, color: Color32) {

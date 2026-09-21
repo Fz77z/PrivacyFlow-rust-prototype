@@ -28,16 +28,11 @@ fn inference_timeout(audio: Duration) -> Duration {
 }
 
 #[derive(Debug, Clone)]
-pub struct RouteResult {
-    pub route: Route,
-    pub elapsed_ms: u128,
-}
-
-#[derive(Debug, Clone)]
 pub struct InferenceResult {
     pub transcript: String,
     pub asr_ms: u128,
-    pub route: RouteResult,
+    pub route: Route,
+    pub router_ms: u128,
     /// The text the route produced, which is the raw transcript for
     /// `PASS_THROUGH` and the processor's rewrite for a processed route.
     pub output: String,
@@ -235,15 +230,13 @@ fn parse_response(line: &str) -> Result<InferenceResult> {
             .asr_ms
             .ok_or_else(|| anyhow!("Inference worker omitted ASR latency"))?
             .round() as u128,
-        route: RouteResult {
-            route: response
-                .route
-                .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
-            elapsed_ms: response
-                .router_ms
-                .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
-                .round() as u128,
-        },
+        route: response
+            .route
+            .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
+        router_ms: response
+            .router_ms
+            .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
+            .round() as u128,
     })
 }
 
@@ -350,7 +343,7 @@ mod tests {
     #[test]
     fn a_pass_through_reply_inserts_the_raw_transcript_and_reports_no_processing() {
         let result = parse_response(PASS_THROUGH_REPLY).unwrap();
-        assert_eq!(result.route.route, Route::PassThrough);
+        assert_eq!(result.route, Route::PassThrough);
         assert_eq!(result.output, "This was written using the dictation.");
         assert_eq!(result.output, result.transcript);
         assert_eq!(result.processing_ms, None);
@@ -359,7 +352,7 @@ mod tests {
     #[test]
     fn a_processed_reply_inserts_the_rewrite_rather_than_the_transcript() {
         let result = parse_response(TRANSFORM_REPLY).unwrap();
-        assert_eq!(result.route.route, Route::Transform);
+        assert_eq!(result.route, Route::Transform);
         assert_eq!(result.transcript, "Yo yo yo it's your boy");
         assert_eq!(result.output, "Yo yo yo, it's your boy.");
         assert_eq!(result.processing_ms, Some(394));

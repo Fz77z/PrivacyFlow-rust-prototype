@@ -1,5 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+/// What the capsule is showing, which is also the app's single answer to
+/// "where is this dictation up to?". Listening and Processing are the two
+/// states a dictation is in flight, so nothing else needs to track that
+/// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HudState {
     Idle,
@@ -12,13 +16,6 @@ pub enum HudState {
     /// in the user's hands, they just need a paste.
     Copied,
     Error,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordingState {
-    Idle,
-    Recording,
-    Processing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -126,7 +123,6 @@ pub enum ConsoleTab {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub recording: RecordingState,
     pub hud: HudState,
     pub mic_level: f32,
     pub transcript: String,
@@ -153,7 +149,6 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            recording: RecordingState::Idle,
             hud: HudState::Idle,
             mic_level: 0.0,
             transcript: String::new(),
@@ -178,7 +173,6 @@ impl AppState {
     /// including the dwell timer, so a press that arrives while the last
     /// result is still on screen cannot be retired by that result's clock.
     pub fn reset_for_recording(&mut self) {
-        self.recording = RecordingState::Recording;
         self.hud = HudState::Listening;
         self.mic_level = 0.0;
         self.clear_result();
@@ -199,7 +193,6 @@ impl AppState {
     /// dot points at the console unless the console is already the thing the
     /// user is looking at.
     pub fn record_failure(&mut self, failure: Failure) {
-        self.recording = RecordingState::Idle;
         self.hud = HudState::Error;
         if !self.console_open {
             self.unread_failure = true;
@@ -238,13 +231,10 @@ impl AppState {
     }
 }
 
-pub fn dur_ms(d: Duration) -> u128 {
-    d.as_millis()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn recording_reset_clears_the_previous_result() {
@@ -256,7 +246,6 @@ mod tests {
             ..Default::default()
         };
         state.reset_for_recording();
-        assert_eq!(state.recording, RecordingState::Recording);
         assert_eq!(state.hud, HudState::Listening);
         assert!(
             state.transcript.is_empty()
