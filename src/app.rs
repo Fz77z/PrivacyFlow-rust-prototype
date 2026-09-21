@@ -119,6 +119,10 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
+    /// The window's current size. It follows the minimal mode setting and
+    /// nothing else, so it changes only when the user toggles that, never
+    /// while the capsule is animating between its three painted sizes.
+    window_size: egui::Vec2,
 }
 
 impl LocalFlowApp {
@@ -209,6 +213,7 @@ impl LocalFlowApp {
         // `None` so "already the right size" is true from the very first
         // frame: an unseeded `None` would read as a change on frame one and
         // immediately resize a window that was already correct.
+        let window_size = ui::theme::window_size(state.settings.minimal_mode);
         Self {
             state,
             microphone,
@@ -221,6 +226,7 @@ impl LocalFlowApp {
             data_dir,
             centre,
             dragging: false,
+            window_size,
         }
     }
 
@@ -334,6 +340,40 @@ impl LocalFlowApp {
     /// which of the three sizes applies. egui cannot supply that measurement
     /// on its own, since it only reports the pointer relative to a window
     /// that minimal mode is itself resizing.
+    /// Resize the window when, and only when, the minimal mode setting has
+    /// changed.
+    ///
+    /// Minimal mode needs a catchment larger than the capsule so it can
+    /// notice someone approaching. Minimal mode off needs no such thing, and
+    /// giving it one would mean the default setting quietly swallowed clicks
+    /// in a ring of screen the capsule does not visibly occupy. So the window
+    /// follows the setting. It does not follow the capsule's painted size,
+    /// which is what makes the animation free.
+    fn follow_setting_with_the_window(&mut self, ctx: &egui::Context) {
+        let wanted = ui::theme::window_size(self.state.settings.minimal_mode);
+        if wanted == self.window_size {
+            return;
+        }
+        let Some(centre) = self.centre else {
+            return;
+        };
+        // Placed from the visible capsule rather than from the window, so the
+        // catchment's invisible ring is never what pushes the capsule away
+        // from a screen edge the user put it against.
+        let capsule = ui::theme::CAPSULE_SIZE;
+        let (x, y) = crate::window_position::place(
+            centre,
+            (capsule.x, capsule.y),
+            &crate::platform::work_areas(),
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(wanted));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            x - (wanted.x - capsule.x) / 2.0,
+            y - (wanted.y - capsule.y) / 2.0,
+        )));
+        self.window_size = wanted;
+    }
+
     /// What the capsule should be painted as, and how solid.
     ///
     /// Returns the painted size, which is animated and so may be between the
@@ -463,6 +503,7 @@ impl eframe::App for LocalFlowApp {
             }
         }
 
+        self.follow_setting_with_the_window(ctx);
         let (painted, layout, opacity) = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone

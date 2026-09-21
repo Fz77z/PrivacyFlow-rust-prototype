@@ -33,15 +33,16 @@ fn main() -> eframe::Result<()> {
     let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
     let remembered = window_position::load(&data_dir, size);
     let settings = settings::load(&data_dir);
-    // The window never changes size. It is the catchment: the area macOS
-    // delivers mouse events for, and therefore the area within which the
-    // capsule can notice someone approaching. The three capsule sizes are
-    // painted inside it rather than being window sizes of their own.
-    let catchment = ui::theme::CATCHMENT_SIZE;
+    // The window changes size only when the minimal mode setting is toggled,
+    // never while the capsule is animating. With minimal mode on it is the
+    // catchment: the area macOS delivers mouse events for, and therefore the
+    // area within which the capsule can notice someone approaching. The three
+    // capsule sizes are painted inside it rather than being window sizes.
+    let catchment = ui::theme::window_size(settings.settings.minimal_mode);
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([catchment.x, catchment.y])
-        .with_min_inner_size([catchment.x, catchment.y])
-        .with_max_inner_size([catchment.x, catchment.y])
+        .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
+        .with_max_inner_size([ui::theme::CATCHMENT_SIZE.x, ui::theme::CATCHMENT_SIZE.y])
         .with_resizable(false)
         .with_decorations(false)
         .with_transparent(true)

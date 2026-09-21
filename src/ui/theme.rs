@@ -42,6 +42,20 @@ pub const ACTIVE_SIZE: Vec2 = Vec2::new(84.0, 28.0);
 /// if it proves annoying.
 pub const CATCHMENT_SIZE: Vec2 = Vec2::new(320.0, 120.0);
 
+/// The window size for a given setting.
+///
+/// Only minimal mode needs a catchment, because only minimal mode has to
+/// notice someone approaching. With it off the window is exactly the capsule,
+/// as it has always been, so the setting being off costs no screen space that
+/// the capsule does not visibly occupy.
+pub fn window_size(minimal_mode: bool) -> Vec2 {
+    if minimal_mode {
+        CATCHMENT_SIZE
+    } else {
+        CAPSULE_SIZE
+    }
+}
+
 // The surfaces are a neutral near black. An earlier palette tinted them
 // blue, which quietly fought every other colour in the widget: the greens
 // read as minty, and a desaturated accent laid over them looked muddy
