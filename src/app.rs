@@ -2,7 +2,7 @@ use crate::audio::{CapturedAudio, Microphone};
 use crate::platform::{
     frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
 };
-use crate::router::{KevWorker, Reply};
+use crate::router::{KevWorker, Reply, WorkerShutdown};
 use crate::state::{AppState, Failure, HudState, Route, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
@@ -10,6 +10,10 @@ use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
+
+/// How long the capsule takes to change size. This is drawing rather than an
+/// operating system window resize, so it is eased at the display's rate.
+const GROW_SECONDS: f32 = 0.18;
 
 const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 
@@ -20,29 +24,6 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 /// dictation, which takes about a second, still reads as instant feedback.
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
-/// Within this distance of the capsule's centre the bead is solid.
-const NEAR_RADIUS: f32 = 120.0;
-/// Beyond this distance it has faded as far as it goes.
-const FAR_RADIUS: f32 = 420.0;
-/// How faint the bead is allowed to get.
-///
-/// Deliberately not zero. LocalFlow has no Dock icon and no menu bar item, so
-/// a bead that fades to nothing is an application the user cannot find, which
-/// is the same failure as a capsule restored onto a display that is gone.
-const BEAD_OPACITY_FLOOR: f32 = 0.18;
-const _: () = assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
-
-/// How solid the bead should be, given how far away the pointer is.
-fn bead_opacity(distance: f32) -> f32 {
-    if distance <= NEAR_RADIUS {
-        return 1.0;
-    }
-    if distance >= FAR_RADIUS {
-        return BEAD_OPACITY_FLOOR;
-    }
-    let travelled = (distance - NEAR_RADIUS) / (FAR_RADIUS - NEAR_RADIUS);
-    1.0 - travelled * (1.0 - BEAD_OPACITY_FLOOR)
-}
 
 struct WorkItem {
     captured: CapturedAudio,
@@ -69,6 +50,11 @@ struct WorkResult {
     output: String,
     timings: Timings,
     outcome: Outcome,
+    /// The utterance's WAV filename stem, which the worker sees as part of the
+    /// audio path and records against its own trace. Correlating on this rather
+    /// than on timestamps or arrival order means a dropped or reordered record
+    /// cannot silently pair the wrong halves of a dictation.
+    trace_id: Option<String>,
 }
 
 /// The pipeline thread's only way of speaking to the UI. Readiness travels
@@ -103,15 +89,14 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
-    /// The size the window is currently resized to. Seeded at construction
-    /// from the size the window actually starts at (which `main.rs` decides
-    /// from the same setting), then kept in step whenever the window is
-    /// resized. Compared against this frame's chosen size so the window is
-    /// only touched, and `work_areas` only queried, on an actual transition
-    /// between the three sizes, and this holds regardless of whether minimal
-    /// mode is currently on or off: it also covers being switched off while
-    /// the window is not yet full size.
-    applied_size: Option<ui::capsule::CapsuleSize>,
+    /// Stops the Python worker when the application goes away. The worker
+    /// lives on a detached thread whose stack is never unwound at process
+    /// exit, so its own `Drop` cannot be relied on to do it.
+    worker_shutdown: WorkerShutdown,
+    /// The window's current size. It follows the minimal mode setting and
+    /// nothing else, so it changes only when the user toggles that, never
+    /// while the capsule is animating between its three painted sizes.
+    window_size: egui::Vec2,
 }
 
 impl LocalFlowApp {
@@ -123,9 +108,10 @@ impl LocalFlowApp {
         install_visuals(&cc.egui_ctx);
         // The capsule floats over whatever the user is writing in, so clicking
         // it to drag it or to open the console must not take focus away from
-        // that. Done here because the window exists by the time this runs and
-        // the console, which is a normal window and should take focus, does
-        // not exist yet.
+        // that. Done here because the window exists by the time this runs.
+        // The console is left alone by name rather than by timing: the
+        // replacement identifies the capsule and defers for every other
+        // window, so it does not matter that the console is created later.
         let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
@@ -177,7 +163,9 @@ impl LocalFlowApp {
         let focus_error = (!capsule_non_activating).then(|| {
             Failure::blocked(
                 "Capsule takes focus",
-                "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
+                "The capsule could not be stopped from taking keyboard focus. \
+                 Clicking it will move focus away from what you are writing in, \
+                 and the next dictation will report no text field focused.",
             )
         });
         if let Some(failure) =
@@ -194,15 +182,21 @@ impl LocalFlowApp {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
-        start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
-        let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
-        let centre = crate::window_position::load(&data_dir, capsule_size);
+        let worker_shutdown = WorkerShutdown::default();
+        start_pipeline_worker(
+            work_rx,
+            result_tx,
+            audio_dir,
+            cc.egui_ctx.clone(),
+            worker_shutdown.clone(),
+        );
+        let centre = crate::window_position::load(&data_dir);
         // Matches what main.rs already decided the window starts at, from the
         // same setting and the same `size_for` rule. Seeded rather than left
         // `None` so "already the right size" is true from the very first
         // frame: an unseeded `None` would read as a change on frame one and
         // immediately resize a window that was already correct.
-        let applied_size = Some(ui::capsule::size_for(state.settings.minimal_mode, false, false));
+        let window_size = ui::theme::window_size(state.settings.minimal_mode);
         Self {
             state,
             microphone,
@@ -215,7 +209,8 @@ impl LocalFlowApp {
             data_dir,
             centre,
             dragging: false,
-            applied_size,
+            window_size,
+            worker_shutdown,
         }
     }
 
@@ -320,94 +315,103 @@ impl LocalFlowApp {
         self.state.record_failure(failure);
     }
 
-    /// Picks the capsule's size and opacity for this frame, and keeps the
-    /// window in step with whichever size that turns out to be.
+    /// Resize the window when, and only when, the minimal mode setting has
+    /// changed.
     ///
-    /// Bundled together because minimal mode needs one measurement, the
-    /// pointer's position on screen, to answer three questions: is the user
-    /// pointing at the capsule, how solid should the bead be, and therefore
-    /// which of the three sizes applies. egui cannot supply that measurement
-    /// on its own, since it only reports the pointer relative to a window
-    /// that minimal mode is itself resizing.
-    fn choose_shape(&mut self, ctx: &egui::Context) -> (ui::capsule::CapsuleSize, f32) {
-        // Minimal mode has to know where the pointer is even when it is
-        // outside the window, which egui cannot report: it measures relative
-        // to the window, and a window that resizes under the cursor perturbs
-        // the very number deciding whether it should resize.
+    /// Minimal mode needs a catchment larger than the capsule so it can
+    /// notice someone approaching. Minimal mode off needs no such thing, and
+    /// giving it one would mean the default setting quietly swallowed clicks
+    /// in a ring of screen the capsule does not visibly occupy. So the window
+    /// follows the setting. It does not follow the capsule's painted size,
+    /// which is what makes the animation free.
+    fn follow_setting_with_the_window(&mut self, ctx: &egui::Context) {
+        let wanted = ui::theme::window_size(self.state.settings.minimal_mode);
+        if wanted == self.window_size {
+            return;
+        }
+        let Some(centre) = self.centre else {
+            return;
+        };
+        // Placed from the visible capsule rather than from the window, so the
+        // catchment's invisible ring is never what pushes the capsule away
+        // from a screen edge the user put it against.
+        let capsule = ui::theme::CAPSULE_SIZE;
+        let (x, y) = crate::window_position::place(
+            centre,
+            (capsule.x, capsule.y),
+            &crate::platform::work_areas(),
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(wanted));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            x - (wanted.x - capsule.x) / 2.0,
+            y - (wanted.y - capsule.y) / 2.0,
+        )));
+        self.window_size = wanted;
+    }
+
+    /// What the capsule should be painted as, and how solid.
+    ///
+    /// Returns the painted size, which is animated and so is usually between
+    /// the three fixed sizes. The capsule works out its own layout from it.
+    ///
+    /// The window never changes size, so nothing here touches the viewport.
+    /// The pointer comes from egui rather than from the screen, because the
+    /// window is now the catchment and receives real move events across the
+    /// whole of it, including the parts it does not paint.
+    fn choose_shape(&mut self, ctx: &egui::Context) -> egui::Vec2 {
         let minimal = self.state.settings.minimal_mode;
-        let (pointing, distance) = if minimal {
-            let (px, py) = crate::platform::pointer_in_window_space();
-            let rect = ctx.input(|i| i.viewport().outer_rect);
-            let pointing = rect.is_some_and(|rect| {
-                rect.contains(egui::pos2(px as f32, py as f32))
-            }) || self.dragging;
-            let distance = self
-                .centre
-                .map(|centre| {
-                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
-                })
-                .unwrap_or(0.0);
-            (pointing, distance)
-        } else {
-            (false, 0.0)
+        let window = ctx.screen_rect();
+        // The capsule sits in the middle of the catchment, and this is the
+        // rectangle the user is reaching for. Entering it expands the
+        // capsule. The ring outside it is the lead-in: it is what lets the
+        // window see a pointer coming before it arrives, and it is also the
+        // part that swallows clicks without ever painting anything.
+        let reach = egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE);
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let pointing = match (minimal, pointer) {
+            (false, _) => false,
+            (true, Some(pos)) => reach.contains(pos) || self.dragging,
+            // No pointer at all means it is outside the catchment entirely.
+            (true, None) => self.dragging,
         };
         // A dictation that has not yet retired counts as active, with one
         // exception: a startup failure deliberately clears `done_at` so it
-        // never retires on its own (see `new`, where `hotkey_error.or(...)`
-        // is recorded). Without carving that out, `active` would stay true
-        // for the rest of the session, which would pin a minimal-mode capsule
-        // at the dictating size forever with no user action behind it, the
-        // governing rule inverted. Every mid-dictation failure goes through
-        // `record_failure` and then `settle`, which sets `done_at`, so this
-        // only ever excludes the startup case.
+        // never retires on its own. Without carving that out, `active` would
+        // stay true for the rest of the session, pinning a minimal-mode
+        // capsule at the dictating size forever with no user action behind
+        // it, the governing rule inverted. Every mid-dictation failure goes
+        // through `record_failure` and then `settle`, which sets `done_at`.
         let active = self.state.hud != HudState::Idle
             && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
         let size = ui::capsule::size_for(minimal, pointing, active);
-        // The proximity fade is a property of the bead, not of the capsule as
-        // a whole: `Full` happens to be safe either way, since pointing at it
-        // implies zero distance, but `Active` is not, and a dictation with
-        // the pointer parked elsewhere must stay fully legible rather than
-        // fading to the floor.
-        let opacity =
-            if size == ui::capsule::CapsuleSize::Bead { bead_opacity(distance) } else { 1.0 };
-        if minimal {
-            // Polling the pointer means an idle LocalFlow in minimal mode
-            // wakes ten times a second rather than sleeping until an event.
-            // That is the price of the proximity fade, and it is paid only
-            // while minimal mode is on, which is not the default. This is the
-            // one thing that is genuinely specific to minimal mode being on;
-            // the resize below is not, and must not be gated the same way.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-        // Snapped straight to the chosen size rather than tweened towards it,
-        // so the window and the capsule `show` paints can never disagree
-        // about the size. Resized only on an actual transition to `size`,
-        // regardless of whether minimal mode is on right now, so switching it
-        // off restores a shrunk window instead of leaving it stuck.
+        // Animated, because this is now drawing rather than an operating
+        // system window resize. Both axes are eased on the same clock, so the
+        // capsule cannot shear.
         let target = size.points();
-        if self.applied_size != Some(size) {
-            if let Some(centre) = self.centre {
-                let (x, y) = crate::window_position::place(
-                    centre,
-                    (target.x, target.y),
-                    &crate::platform::work_areas(),
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                    target.x, target.y,
-                )));
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
-                self.applied_size = Some(size);
-            }
-        }
-        (size, opacity)
+        egui::vec2(
+            ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, GROW_SECONDS),
+            ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, GROW_SECONDS),
+        )
     }
 }
 
 impl eframe::App for LocalFlowApp {
     /// The capsule paints its own shape into a transparent window, so the
-    /// window itself must contribute nothing. eframe's default clear colour is
-    /// a 70% opaque near-black across the whole viewport, which shows up as a
-    /// rectangle around the capsule's rounded corners.
+    /// window itself must contribute nothing. eframe's default clear colour
+    /// is a 70% opaque near-black across the whole viewport, which would show
+    /// up as a rectangle around the capsule's rounded corners, and now that
+    /// the window is a catchment much larger than the capsule it would show
+    /// up as a rectangle around a great deal of empty space.
+    /// Stop the worker before the process goes away.
+    ///
+    /// Nothing else will. `KevWorker` kills its child when it drops, but it
+    /// is owned by a detached thread that is never unwound at exit, and for
+    /// the first ten seconds that thread is blocked inside `start` loading
+    /// models where it cannot see its channel close.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.worker_shutdown.stop();
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
@@ -474,9 +478,8 @@ impl eframe::App for LocalFlowApp {
             }
         }
 
-        let (size, opacity) = self.choose_shape(ctx);
-        let target = size.points();
-        let (width, height) = (target.x, target.y);
+        self.follow_setting_with_the_window(ctx);
+        let painted = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
@@ -485,7 +488,7 @@ impl eframe::App for LocalFlowApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let response =
-                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), size, opacity);
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
                 self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {
@@ -504,10 +507,17 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
-                            let centre = crate::window_position::Centre {
-                                x: position.x + width / 2.0,
-                                y: position.y + height / 2.0,
-                            };
+                            // Converted with the size of the window that was
+                            // actually dragged, not with the catchment's.
+                            // Minimal mode off gives a window barely larger
+                            // than the capsule, and using the catchment's
+                            // size there put the remembered centre tens of
+                            // points adrift, once per drag, compounding
+                            // across restarts.
+                            let centre = crate::window_position::centre_of_window(
+                                (position.x, position.y),
+                                (self.window_size.x, self.window_size.y),
+                            );
                             self.centre = Some(centre);
                             crate::window_position::save(&self.data_dir, centre);
                         }
@@ -554,6 +564,7 @@ fn start_pipeline_worker(
     result_tx: Sender<PipelineMessage>,
     audio_dir: PathBuf,
     repaint: egui::Context,
+    shutdown: WorkerShutdown,
 ) {
     std::thread::Builder::new()
         .name("localflow-pipeline".into())
@@ -562,7 +573,10 @@ fn start_pipeline_worker(
             // checkpoint once, then remains resident for the app lifetime.
             let mut worker = KevWorker::start().map_err(|error| error.to_string());
             match &worker {
-                Ok(_) => {
+                Ok(worker) => {
+                    // Registered the moment it exists, so quitting during the
+                    // ten seconds of model loading still stops it.
+                    shutdown.watch(worker);
                     let _ = result_tx.send(PipelineMessage::WorkerReady);
                 }
                 Err(error) => {
@@ -571,11 +585,42 @@ fn start_pipeline_worker(
             }
             repaint.request_repaint();
             for item in work_rx {
-                let _ = result_tx.send(process(&mut worker, &audio_dir, item));
+                let message = process(&mut worker, &audio_dir, item);
+                // Traced before the send only in the sense of being prepared
+                // here; the UI is told first, because a diagnostic must never
+                // sit between a finished dictation and the capsule showing it.
+                let trace = latency_trace_for(&message);
+                let _ = result_tx.send(message);
                 repaint.request_repaint();
+                if let Some((id, outcome, route, timings)) = trace {
+                    crate::latency_trace::record(&crate::latency_trace::LatencyTrace {
+                        trace_id: &id,
+                        captured_at: chrono::Utc::now().to_rfc3339(),
+                        outcome,
+                        route,
+                        timings: &timings,
+                    });
+                }
             }
         })
         .expect("Could not start LocalFlow pipeline worker");
+}
+
+/// Everything a finished dictation contributes to the latency dataset, or
+/// nothing when it never got far enough to have an id to correlate on.
+fn latency_trace_for(
+    message: &PipelineMessage,
+) -> Option<(String, &'static str, Option<Route>, Timings)> {
+    let PipelineMessage::Finished(result) = message else {
+        return None;
+    };
+    let id = result.trace_id.clone()?;
+    let outcome = match result.outcome {
+        Outcome::Inserted(Insertion::Pasted) => "inserted",
+        Outcome::Inserted(Insertion::CopiedOnly) => "copied",
+        Outcome::Failed(_) => "failed",
+    };
+    Some((id, outcome, result.route, result.timings.clone()))
 }
 
 /// Utterance audio is temporary, but a crash or a force quit leaves the last
@@ -623,9 +668,9 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                String::new(),
-                None,
-                String::new(),
+                // No WAV was written, so there is nothing produced and no id
+                // for a worker record to pair with.
+                Partial::default(),
                 "Transcription failed",
                 error.to_string(),
             )
@@ -633,6 +678,11 @@ fn process(
     };
     timings.capture_finalize_ms = Some(finalize_started.elapsed().as_millis());
     timings.audio_ms = Some(audio.duration.as_millis());
+    let trace_id = audio
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_owned());
 
     let inference = match worker {
         Ok(worker) => worker.transcribe_and_route(&audio.path, audio.duration),
@@ -650,13 +700,24 @@ fn process(
         Ok(Reply::Transcribed(inference)) => inference,
         // Nothing was said, so there is nothing to route, insert or file.
         Ok(Reply::NoSpeech) => return PipelineMessage::NoSpeech,
+        // The pipeline failed after recognising speech. The failure stands,
+        // and the words are not thrown away with it.
+        Ok(Reply::Failed { message, transcript }) => {
+            let words = transcript.unwrap_or_default();
+            let preserved = preserve(&words, || Preserved::Raw);
+            return failed(
+                timings,
+                speech_finished,
+                Partial { transcript: words, trace_id, ..Default::default() },
+                "Dictation failed",
+                failure_detail(&message, &preserved),
+            );
+        }
         Err(error) => {
             return failed(
                 timings,
                 speech_finished,
-                String::new(),
-                None,
-                String::new(),
+                Partial { trace_id, ..Default::default() },
                 "Transcription failed",
                 error.to_string(),
             )
@@ -675,11 +736,19 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                inference.transcript,
-                Some(inference.route),
-                String::new(),
+                Partial {
+                    transcript: inference.transcript,
+                    route: Some(inference.route),
+                    output: inference.output.clone(),
+                    trace_id,
+                },
                 "Couldn't insert",
-                "No destination app was focused when dictation started".to_owned(),
+                // Processing succeeded, so what is preserved is the finished
+                // text rather than the raw transcription.
+                failure_detail(
+                    "No destination app was focused when dictation started.",
+                    &preserve(&inference.output, || Preserved::Processed),
+                ),
             )
         }
     };
@@ -690,9 +759,12 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                inference.transcript,
-                Some(inference.route),
-                String::new(),
+                Partial {
+                    transcript: inference.transcript,
+                    route: Some(inference.route),
+                    output: String::new(),
+                    trace_id,
+                },
                 "Couldn't insert",
                 error.to_string(),
             )
@@ -706,27 +778,86 @@ fn process(
         output: inference.output,
         timings,
         outcome: Outcome::Inserted(insertion),
+        trace_id,
     }))
+}
+
+/// What became of the user's words when the pipeline failed after producing
+/// them. Preserving is not inserting: text that failed its processing is never
+/// typed into the document as though it had succeeded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Preserved {
+    /// The raw transcription, because processing never completed.
+    Raw,
+    /// The finished text, which processing produced but insertion could not place.
+    Processed,
+    /// The words could not even be put on the pasteboard.
+    Unavailable(String),
+}
+
+/// The detail the console shows for a failure that happened after the user's
+/// words existed.
+///
+/// The original failure always leads: preservation is something that also
+/// happened, never a replacement for the reason. A failed preservation is
+/// reported alongside rather than swallowed, and raw text is never described
+/// as though it had been processed.
+pub fn failure_detail(original: &str, preserved: &Preserved) -> String {
+    match preserved {
+        Preserved::Raw => format!(
+            "{original} Your words are on the clipboard: press Cmd-V to place them. \
+             This is the raw transcription, not the processed text."
+        ),
+        Preserved::Processed => format!(
+            "{original} The finished text is on the clipboard: press Cmd-V to place it."
+        ),
+        Preserved::Unavailable(why) => format!(
+            "{original} The words could not be put on the clipboard either: {why}"
+        ),
+    }
+}
+
+/// Put a failed dictation's words somewhere the user can reach them.
+///
+/// Reports what happened rather than returning a Result, because a failure
+/// here must never replace the failure that lost the dictation.
+fn preserve(text: &str, kind: fn() -> Preserved) -> Preserved {
+    if text.is_empty() {
+        return Preserved::Unavailable("there was no text to preserve".to_owned());
+    }
+    match crate::platform::copy_to_pasteboard(text) {
+        Ok(()) => kind(),
+        Err(error) => Preserved::Unavailable(format!("{error:#}")),
+    }
+}
+
+/// Whatever a lost dictation did manage to produce before it was lost. Empty
+/// for a failure early enough that nothing had been produced yet.
+#[derive(Default)]
+struct Partial {
+    transcript: String,
+    route: Option<Route>,
+    output: String,
+    trace_id: Option<String>,
 }
 
 fn failed(
     mut timings: Timings,
     speech_finished: Instant,
-    transcript: String,
-    route: Option<Route>,
-    output: String,
+    partial: Partial,
     headline: &'static str,
     error: String,
 ) -> PipelineMessage {
     timings.total_ms = Some(speech_finished.elapsed().as_millis());
     PipelineMessage::Finished(Box::new(WorkResult {
-        transcript,
-        route,
-        output,
+        transcript: partial.transcript,
+        route: partial.route,
+        output: partial.output,
         timings,
         // Every pipeline failure happens after the user has spoken, so the
         // kind is settled here: the words did not come back.
         outcome: Outcome::Failed(Failure::dropped(headline, error)),
+        trace_id: partial.trace_id,
     }))
 }
 
@@ -765,30 +896,56 @@ mod tests {
         sweep_audio_cache(&dir);
     }
 
-    /// The bead fades as the pointer moves away, and stops fading at a floor.
-    /// It must never reach zero: LocalFlow has no Dock icon and no menu bar
-    /// item, so a bead that can become invisible is an application with no
-    /// way back, which is the same failure as a capsule restored off screen.
+}
+
+#[cfg(test)]
+mod preservation_tests {
+    use super::*;
+
+    /// The failure that lost the dictation is what the user needs to read.
+    /// Preservation is something that also happened, never a replacement.
     #[test]
-    fn the_bead_fades_with_distance_but_never_disappears() {
-        assert_eq!(bead_opacity(0.0), 1.0);
-        assert_eq!(bead_opacity(NEAR_RADIUS), 1.0);
-        assert_eq!(bead_opacity(FAR_RADIUS), BEAD_OPACITY_FLOOR);
-        assert_eq!(bead_opacity(10_000.0), BEAD_OPACITY_FLOOR);
-        let middle = bead_opacity((NEAR_RADIUS + FAR_RADIUS) / 2.0);
-        assert!(middle > BEAD_OPACITY_FLOOR && middle < 1.0);
-        // The floor-is-never-zero invariant is a compile-time assertion next
-        // to the constant, not a runtime one here: see BEAD_OPACITY_FLOOR.
+    fn the_original_failure_leads_and_preservation_follows() {
+        let detail = failure_detail("S1-mini failed to process this LIGHT_CLEANUP utterance.",
+                                    &Preserved::Raw);
+        assert!(detail.starts_with("S1-mini failed to process this LIGHT_CLEANUP utterance."));
+        assert!(detail.contains("clipboard"));
     }
 
-    /// Monotonic, so the bead never brightens as the pointer retreats.
+    /// Raw text must never be described as though it had been processed. The
+    /// user is deciding whether to paste it, and that decision needs the truth.
     #[test]
-    fn the_bead_never_brightens_as_the_pointer_moves_away() {
-        let mut previous = bead_opacity(0.0);
-        for step in 1..=60 {
-            let opacity = bead_opacity(step as f32 * 10.0);
-            assert!(opacity <= previous, "opacity rose at {step}");
-            previous = opacity;
-        }
+    fn raw_text_is_not_presented_as_processed() {
+        let detail = failure_detail("Routing failed.", &Preserved::Raw);
+        assert!(detail.contains("raw transcription"));
+        assert!(!detail.contains("finished text"));
+    }
+
+    #[test]
+    fn processed_text_is_described_as_finished() {
+        let detail = failure_detail("No destination app was focused.", &Preserved::Processed);
+        assert!(detail.contains("finished text"));
+        assert!(!detail.contains("raw transcription"));
+    }
+
+    /// A clipboard failure is a second problem, not a replacement for the first.
+    #[test]
+    fn a_preservation_failure_is_reported_beside_the_original_not_instead_of_it() {
+        let detail = failure_detail(
+            "COMPLEX processing is not implemented yet.",
+            &Preserved::Unavailable("Could not access macOS pasteboard".to_owned()),
+        );
+        assert!(detail.contains("COMPLEX processing is not implemented yet."),
+                "the original failure must survive a failed preservation");
+        assert!(detail.contains("Could not access macOS pasteboard"));
+    }
+
+    /// An ASR failure has nothing to preserve, and must not claim otherwise.
+    #[test]
+    fn nothing_is_claimed_when_there_were_no_words() {
+        let preserved = preserve("", || Preserved::Raw);
+        assert_eq!(preserved, Preserved::Unavailable("there was no text to preserve".to_owned()));
+        let detail = failure_detail("Transcription failed.", &preserved);
+        assert!(!detail.contains("press Cmd-V"));
     }
 }

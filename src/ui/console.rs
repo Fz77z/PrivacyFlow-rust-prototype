@@ -93,7 +93,8 @@ fn activity(ui: &mut Ui, state: &AppState) {
                         ui.add_space(5.0);
                         ui.colored_label(
                             theme::MUTED,
-                            "Copied to the clipboard, not pasted: the destination app was no                              longer frontmost.",
+                            "Copied to the clipboard, not pasted: the destination app was \
+                             no longer frontmost.",
                         );
                     }
                     // The console keeps the original message, whatever the

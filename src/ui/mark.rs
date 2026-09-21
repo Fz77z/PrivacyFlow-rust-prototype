@@ -27,19 +27,14 @@ pub struct Appearance {
 
 /// Paints the mark. `level` is the current microphone level and `time` drives
 /// the shimmer; both only ever change bar heights inside `rect`, never the
-/// box itself. `opacity` fades every colour the mark paints, so a caller
-/// fading the whole capsule does not leave the mark behind at full strength.
+/// box itself.
 pub fn paint(
     painter: &Painter,
     rect: Rect,
     appearance: &Appearance,
     level: f32,
     time: f64,
-    opacity: f32,
 ) {
-    // Everything below reads through this rather than threading opacity into
-    // each colour by hand.
-    let fade = |color: Color32| color.gamma_multiply(opacity);
     let bar_width = rect.width() * BAR_WIDTH_FRACTION;
     // Bars scale with the box, and so does the stroke that draws a hollow
     // one: at the dictating size's narrower bars, a fixed 1.4pt stroke would
@@ -56,12 +51,12 @@ pub fn paint(
         );
         match bars[index] {
             Bar::Filled(color) => {
-                painter.rect_filled(bar, Rounding::same(bar_width / 2.0), fade(color))
+                painter.rect_filled(bar, Rounding::same(bar_width / 2.0), color)
             }
             Bar::Hollow(color) => painter.rect_stroke(
                 bar,
                 Rounding::same(bar_width / 2.0),
-                Stroke::new(hollow_stroke, fade(color)),
+                Stroke::new(hollow_stroke, color),
             ),
         };
     }
@@ -76,7 +71,7 @@ pub fn paint(
                 Pos2::new(rect.left() + inset, rect.bottom() - inset),
                 Pos2::new(rect.right() - inset, rect.top() + inset),
             ],
-            Stroke::new(2.4 * rect.width() / 36.0, fade(theme::ERROR)),
+            Stroke::new(2.4 * rect.width() / 36.0, theme::ERROR),
         );
     }
 }

@@ -38,15 +38,37 @@ enum Stored {
     TopLeft { x: f32, y: f32 },
 }
 
+/// The capsule's size at the time the old corner-based format was written.
+///
+/// Frozen on purpose. Converting one of those files means undoing the offset
+/// that was applied when it was saved, and that offset was half of THIS size,
+/// whatever the capsule happens to measure today. Reading the current size
+/// here would shift every upgraded install by half of however much the
+/// capsule has been resized since, silently and once per user.
+const LEGACY_CAPSULE_SIZE: (f32, f32) = (240.0, 56.0);
+
 impl Stored {
-    fn into_centre(self, size: (f32, f32)) -> Centre {
+    fn into_centre(self) -> Centre {
         match self {
             Stored::Centre { center_x, center_y } => Centre { x: center_x, y: center_y },
-            Stored::TopLeft { x, y } => {
-                Centre { x: x + size.0 / 2.0, y: y + size.1 / 2.0 }
-            }
+            Stored::TopLeft { x, y } => Centre {
+                x: x + LEGACY_CAPSULE_SIZE.0 / 2.0,
+                y: y + LEGACY_CAPSULE_SIZE.1 / 2.0,
+            },
         }
     }
+}
+
+/// The capsule's centre, given where its window sits and how big that window
+/// is.
+///
+/// The window is not always the capsule: in minimal mode it is a catchment
+/// larger than anything painted in it, and the capsule is centred inside.
+/// Both share a centre, which is the whole reason the centre is what gets
+/// remembered, but only if the conversion uses the size of the window it is
+/// actually converting.
+pub fn centre_of_window(top_left: (f32, f32), window: (f32, f32)) -> Centre {
+    Centre { x: top_left.0 + window.0 / 2.0, y: top_left.1 + window.1 / 2.0 }
 }
 
 #[derive(Serialize)]
@@ -60,9 +82,6 @@ fn path(data_dir: &Path) -> PathBuf {
 }
 
 /// Where the capsule was last left, if that is still somewhere usable.
-///
-/// `size` is the capsule's full size, used only to convert a file written in
-/// the old corner-based format.
 ///
 /// A remembered position is deliberately not trusted. Displays get
 /// disconnected and resolutions change, and a capsule restored onto a monitor
@@ -83,10 +102,10 @@ fn path(data_dir: &Path) -> PathBuf {
 /// or half its coordinates. Nothing here can fix that, which is why this
 /// checks the value that comes back rather than trusting the one that went
 /// out.
-pub fn load(data_dir: &Path, size: (f32, f32)) -> Option<Centre> {
+pub fn load(data_dir: &Path) -> Option<Centre> {
     let text = std::fs::read_to_string(path(data_dir)).ok()?;
     let stored: Stored = serde_json::from_str(&text).ok()?;
-    let centre = stored.into_centre(size);
+    let centre = stored.into_centre();
     if !centre.x.is_finite() || !centre.y.is_finite() {
         return None;
     }
@@ -191,7 +210,7 @@ mod tests {
     #[test]
     fn a_position_saved_in_the_old_format_converts_to_a_centre() {
         let stored: Stored = serde_json::from_str(r#"{"x": 600.0, "y": 800.0}"#).unwrap();
-        let centre = stored.into_centre(CAPSULE);
+        let centre = stored.into_centre();
         assert_eq!(centre.x, 720.0);
         assert_eq!(centre.y, 828.0);
     }
@@ -201,9 +220,46 @@ mod tests {
     fn a_position_saved_in_the_new_format_is_already_a_centre() {
         let stored: Stored =
             serde_json::from_str(r#"{"center_x": 720.0, "center_y": 828.0}"#).unwrap();
-        let centre = stored.into_centre(CAPSULE);
+        let centre = stored.into_centre();
         assert_eq!(centre.x, 720.0);
         assert_eq!(centre.y, 828.0);
+    }
+
+    /// The window is not always the capsule. In minimal mode it is a
+    /// catchment much larger than anything painted in it, and with minimal
+    /// mode off it is the capsule plus a couple of points for the outline.
+    /// Converting a dragged window's corner with the wrong one of those puts
+    /// the remembered centre tens of points adrift, once per drag, and it
+    /// compounds across restarts because the wrong centre is saved and then
+    /// restored and then dragged again.
+    #[test]
+    fn a_dragged_window_converts_with_its_own_size_not_some_other() {
+        let catchment = centre_of_window((100.0, 100.0), (320.0, 120.0));
+        assert_eq!((catchment.x, catchment.y), (260.0, 160.0));
+        let bare = centre_of_window((100.0, 100.0), (216.0, 56.0));
+        assert_eq!((bare.x, bare.y), (208.0, 128.0));
+        assert_ne!(
+            (catchment.x, catchment.y),
+            (bare.x, bare.y),
+            "the two window sizes must not agree, or this test proves nothing"
+        );
+    }
+
+    /// Files written before the capsule could change size hold a corner, and
+    /// converting one means undoing the offset applied when it was saved.
+    /// That offset was half the capsule's size AT THE TIME, so reading
+    /// today's size here would shift every upgraded install by half of
+    /// however much the capsule has been resized since. It has already been
+    /// resized once, from 240 wide to 216.
+    #[test]
+    fn the_old_format_converts_against_the_size_it_was_written_against() {
+        let stored: Stored = serde_json::from_str(r#"{"x": 600.0, "y": 800.0}"#).unwrap();
+        let centre = stored.into_centre();
+        assert_eq!(
+            (centre.x, centre.y),
+            (720.0, 828.0),
+            "half of 240 by 56, the capsule those files were written against"
+        );
     }
 
     #[test]

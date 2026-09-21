@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod instance;
+mod latency_trace;
 mod platform;
 mod router;
 mod settings;
@@ -31,26 +32,33 @@ fn main() -> eframe::Result<()> {
     // The size is passed in rather than assumed, because the check is about
     // how much of this capsule lands on a display.
     let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
-    let remembered = window_position::load(&data_dir, size);
+    let remembered = window_position::load(&data_dir);
     let settings = settings::load(&data_dir);
-    let full = ui::theme::CAPSULE_SIZE;
-    // Neither pointing at nor dictating into a window that does not exist
-    // yet, so this asks `size_for` for the size it settles at rest: the one
-    // rule for "minimal means bead, else full" lives there and nowhere else.
-    let starting = ui::capsule::size_for(settings.settings.minimal_mode, false, false).points();
+    // The window changes size only when the minimal mode setting is toggled,
+    // never while the capsule is animating. With minimal mode on it is the
+    // catchment: the area macOS delivers mouse events for, and therefore the
+    // area within which the capsule can notice someone approaching. The three
+    // capsule sizes are painted inside it rather than being window sizes.
+    let catchment = ui::theme::window_size(settings.settings.minimal_mode);
     let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([starting.x, starting.y])
-            .with_min_inner_size([ui::theme::BEAD_SIZE.x, ui::theme::BEAD_SIZE.y])
-            .with_max_inner_size([full.x, full.y])
-            .with_resizable(false)
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_always_on_top()
-            .with_title("LocalFlow");
+        .with_inner_size([catchment.x, catchment.y])
+        .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
+        .with_max_inner_size([ui::theme::CATCHMENT_SIZE.x, ui::theme::CATCHMENT_SIZE.y])
+        .with_resizable(false)
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top()
+        .with_title("LocalFlow");
     if let Some(centre) = remembered {
-        let starting_size = (starting.x, starting.y);
-        let (x, y) = window_position::place(centre, starting_size, &platform::work_areas());
-        viewport = viewport.with_position([x, y]);
+        // Clamped so the visible capsule lands on screen, not so the whole
+        // catchment does. The catchment's outer ring is never painted, and
+        // keeping it on screen would push the capsule further from the edge
+        // than the user put it, for the sake of space nobody can see.
+        let (x, y) = window_position::place(centre, size, &platform::work_areas());
+        viewport = viewport.with_position([
+            x - (catchment.x - size.0) / 2.0,
+            y - (catchment.y - size.1) / 2.0,
+        ]);
     }
     let options = eframe::NativeOptions {
         viewport,
