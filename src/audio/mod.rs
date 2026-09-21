@@ -7,7 +7,15 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const MAX_RECORDING_SECONDS: usize = 120;
+/// The capture ceiling, in seconds.
+///
+/// Preallocated at startup, so this is a permanent memory cost rather than a
+/// limit that only bites when reached: five minutes of mono f32 at 48kHz is
+/// about 58 MB. It exists to stop a stuck modifier key recording forever, and
+/// it is deliberately far beyond any plausible dictation.
+///
+/// Reaching it stops the recording. It does not discard what was captured.
+const MAX_RECORDING_SECONDS: usize = 300;
 
 /// Requested capture buffer, in frames.
 ///
@@ -173,14 +181,14 @@ impl Microphone {
             .pause()
             .context("Could not pause microphone stream")?;
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
-        if self.overflowed.load(Ordering::Relaxed) {
-            return Err(anyhow!(
-                "Recording exceeded the two-minute local audio buffer; no text was sent"
-            ));
-        }
+        // An overflow is reported rather than thrown. The ring buffer refuses
+        // new samples once it is full, so what was captured is the *start* of
+        // the dictation and the tail is missing. Discarding it would turn a
+        // partly-recorded dictation into no dictation at all.
         Ok(CapturedAudio {
             samples: self.samples.clone(),
             sample_rate: self.sample_rate,
+            truncated: self.overflowed.load(Ordering::Relaxed),
         })
     }
 
@@ -215,6 +223,9 @@ fn requested_buffer_size(supported: &SupportedBufferSize) -> BufferSize {
 pub struct CapturedAudio {
     samples: Arc<Mutex<Consumer<f32>>>,
     sample_rate: u32,
+    /// The buffer filled before the user stopped speaking, so the end of the
+    /// dictation was never captured. What is here is the beginning of it.
+    pub truncated: bool,
 }
 
 impl CapturedAudio {

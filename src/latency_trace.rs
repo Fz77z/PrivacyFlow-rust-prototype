@@ -60,3 +60,87 @@ pub fn record(trace: &LatencyTrace<'_>) {
         }
     }
 }
+
+/// A failure the app raised itself, before any work reached the pipeline.
+///
+/// These used to disappear entirely: the worker traces its own failures and
+/// the pipeline traces its results, but a dictation refused at the microphone
+/// left no record at all. Metadata only - what failed and where, never what
+/// was said. There is no field here that could hold dictated text, and a test
+/// pins that.
+#[derive(Serialize)]
+pub struct AppFailure<'a> {
+    pub captured_at: String,
+    pub outcome: &'static str,
+    pub failing_stage: &'static str,
+    pub kind: &'static str,
+    pub headline: &'a str,
+    pub detail: &'a str,
+}
+
+/// Build the record for an app-side failure.
+///
+/// Separate from writing it so the shape is testable without a filesystem.
+pub fn app_failure<'a>(
+    stage: &'static str,
+    failure: &'a crate::state::Failure,
+) -> AppFailure<'a> {
+    AppFailure {
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        outcome: "failed",
+        failing_stage: stage,
+        kind: match failure.kind {
+            crate::state::FailureKind::Blocked => "blocked",
+            crate::state::FailureKind::InputUnavailable => "input_unavailable",
+            crate::state::FailureKind::Dropped => "dropped",
+        },
+        headline: failure.headline,
+        detail: &failure.detail,
+    }
+}
+
+/// Append an app-side failure, if there is somewhere to put it.
+pub fn record_app_failure(stage: &'static str, failure: &crate::state::Failure) {
+    let Ok(root) = crate::router::research_root() else {
+        return;
+    };
+    let path = root.join("data").join("shadow").join("localflow_traces.jsonl");
+    let Ok(line) = serde_json::to_string(&app_failure(stage, failure)) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Failure;
+
+    /// The trace is written to disk and kept. Dictated text is transient by
+    /// policy, so a failure record must carry what went wrong and nothing the
+    /// user said.
+    #[test]
+    fn an_app_failure_trace_carries_no_dictated_content() {
+        let failure = Failure::dropped(
+            "Transcription failed",
+            "The processing worker stopped unexpectedly",
+        );
+        let record = serde_json::to_value(app_failure("finish_recording", &failure)).unwrap();
+        // serde_json orders keys alphabetically, so this is a set comparison.
+        let keys: Vec<_> = record.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec!["captured_at", "detail", "failing_stage", "headline", "kind", "outcome"],
+            "a new field here is a new way for dictated text to reach the disk"
+        );
+        assert_eq!(record["kind"], "dropped");
+        assert_eq!(record["failing_stage"], "finish_recording");
+    }
+}

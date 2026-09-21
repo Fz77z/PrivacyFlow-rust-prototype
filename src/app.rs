@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 /// operating system window resize, so it is eased at the display's rate.
 const GROW_SECONDS: f32 = 0.18;
 
-const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
+/// Matches the capture buffer's ceiling. Reaching it stops the recording; it
+/// does not throw away what was captured.
+const MAX_RECORDING_DURATION: Duration = Duration::from_secs(300);
 
 /// How long a dictation must be in the pipeline before the capsule says so.
 /// Long enough that an answer arriving almost immediately, which is what a
@@ -25,8 +27,53 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
 
+/// Why capture stopped, which decides whether the finished text may be typed
+/// into the user's document.
+///
+/// Only a deliberate release may insert. A ceiling or a full buffer means the
+/// capture ended without the user asking it to, and quietly typing five
+/// minutes of whatever a stuck key overheard would be worse than making them
+/// paste it themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureEnd {
+    /// The user let go of the key. The ordinary case.
+    Released,
+    /// The recording ceiling stopped it.
+    CeilingReached,
+    /// The buffer filled, so the end of the dictation was never captured.
+    BufferFull,
+}
+
+impl CaptureEnd {
+    pub fn may_insert(self) -> bool {
+        matches!(self, CaptureEnd::Released)
+    }
+
+    /// What to tell the user, for the endings that need explaining.
+    pub fn headline(self) -> &'static str {
+        match self {
+            CaptureEnd::Released => "Couldn't insert",
+            CaptureEnd::CeilingReached => "Recording hit 5 min",
+            CaptureEnd::BufferFull => "Recording filled the buffer",
+        }
+    }
+
+    pub fn explanation(self) -> &'static str {
+        match self {
+            CaptureEnd::Released => "No destination app was focused when dictation started.",
+            CaptureEnd::CeilingReached =>
+                "The five minute recording limit was reached, so the recording was stopped \
+                 and what you said was transcribed.",
+            CaptureEnd::BufferFull =>
+                "The recording filled its buffer, so the end of what you said was not \
+                 captured. What was captured has been transcribed.",
+        }
+    }
+}
+
 struct WorkItem {
     captured: CapturedAudio,
+    capture_end: CaptureEnd,
     speech_finished: Instant,
     queued_at: Instant,
     target_pid: Option<i32>,
@@ -222,14 +269,14 @@ impl LocalFlowApp {
         }
         let target_pid = frontmost_application_pid();
         if target_pid == Some(std::process::id() as i32) || target_pid.is_none() {
-            self.fail(Failure::blocked(
+            self.fail_locally("start_recording", Failure::blocked(
                 "No text field focused",
                 "Focus the destination text field before dictating",
             ));
             return;
         }
         let Some(microphone) = &self.microphone else {
-            self.fail(Failure::input_unavailable(
+            self.fail_locally("start_recording", Failure::input_unavailable(
                 "Microphone unavailable",
                 "The microphone is unavailable; restart LocalFlow",
             ));
@@ -238,7 +285,8 @@ impl LocalFlowApp {
         // The stream was built at startup, so this only restarts it. Opening
         // the device here would cost over a hundred milliseconds of speech...
         if let Err(error) = microphone.start_recording() {
-            self.fail(Failure::input_unavailable("Microphone unavailable", error.to_string()));
+            self.fail_locally("start_recording",
+                Failure::input_unavailable("Microphone unavailable", error.to_string()));
             return;
         }
         self.state.reset_for_recording();
@@ -246,7 +294,7 @@ impl LocalFlowApp {
         self.recording_started = Some(Instant::now());
     }
 
-    fn finish_recording(&mut self) {
+    fn finish_recording(&mut self, ending: CaptureEnd) {
         if self.recording_started.take().is_none() {
             return;
         }
@@ -260,23 +308,34 @@ impl LocalFlowApp {
         // releasing the hotkey never janks the HUD or delays the next press...
         match microphone.stop_recording() {
             Ok(captured) => {
+                // A buffer that filled is still a dictation, just a shortened
+                // one, so it travels as an ending rather than an error.
+                let capture_end = if captured.truncated {
+                    CaptureEnd::BufferFull
+                } else {
+                    ending
+                };
                 if self
                     .work_tx
                     .send(WorkItem {
                         captured,
+                        capture_end,
                         speech_finished,
                         queued_at: Instant::now(),
                         target_pid: self.target_pid.take(),
                     })
                     .is_err()
                 {
-                    self.fail(Failure::dropped(
+                    self.fail_locally("finish_recording", Failure::dropped(
                         "Transcription failed",
                         "The processing worker stopped unexpectedly",
                     ));
                 }
             }
-            Err(error) => self.fail(Failure::dropped("Recording failed", error.to_string())),
+            Err(error) => self.fail_locally(
+                "finish_recording",
+                Failure::dropped("Recording failed", error.to_string()),
+            ),
         }
     }
 
@@ -313,6 +372,15 @@ impl LocalFlowApp {
 
     fn fail(&mut self, failure: Failure) {
         self.state.record_failure(failure);
+    }
+
+    /// Fail before any work reached the pipeline, and leave a record of it.
+    ///
+    /// The pipeline traces its own results and the worker traces its own
+    /// failures; a dictation refused here left nothing behind at all.
+    fn fail_locally(&mut self, stage: &'static str, failure: Failure) {
+        crate::latency_trace::record_app_failure(stage, &failure);
+        self.fail(failure);
     }
 
     /// Resize the window when, and only when, the minimal mode setting has
@@ -420,7 +488,7 @@ impl eframe::App for LocalFlowApp {
         while let Ok(event) = self.hotkey_events.try_recv() {
             match event {
                 HotkeyEvent::Pressed => self.start_recording(),
-                HotkeyEvent::Released => self.finish_recording(),
+                HotkeyEvent::Released => self.finish_recording(CaptureEnd::Released),
             }
         }
         self.receive_results();
@@ -429,17 +497,12 @@ impl eframe::App for LocalFlowApp {
             .recording_started
             .is_some_and(|started| started.elapsed() >= MAX_RECORDING_DURATION)
         {
-            // Pause without writing a WAV. This bounds memory use even if macOS
-            // or a modifier-key edge case loses the release event.
-            if let Some(microphone) = &self.microphone {
-                let _ = microphone.stop_recording();
-            }
-            self.recording_started = None;
-            self.target_pid = None;
-            self.fail(Failure::dropped(
-                "Recording hit 2 min",
-                "Recording stopped after two minutes; please dictate again",
-            ));
+            // The ceiling stops the recording, which is its whole purpose. It
+            // used to discard the audio too, on the stated grounds of bounding
+            // memory - but the buffer is preallocated, so the memory was spent
+            // the moment the app started and discarding bought nothing. What
+            // it cost was five minutes of someone's words.
+            self.finish_recording(CaptureEnd::CeilingReached);
         }
         if let Some(done_at) = self.state.done_at {
             if done_at.elapsed() > Duration::from_millis(1400)
@@ -661,6 +724,7 @@ fn process(
         ..Default::default()
     };
     let target_pid = item.target_pid;
+    let capture_end = item.capture_end;
     let finalize_started = Instant::now();
     let audio = match item.captured.write_wav(audio_dir) {
         Ok(audio) => audio,
@@ -730,7 +794,10 @@ fn process(
     // unimplemented one, so there is a single place that maps route to text.
     timings.transform_ms = inference.processing_ms;
 
-    let target_pid = match target_pid {
+    // An ending the user did not ask for, or a destination that is not there,
+    // both mean the same thing: the words are preserved for the user to place
+    // rather than placed for them.
+    let target_pid = match target_pid.filter(|_| capture_end.may_insert()) {
         Some(pid) => pid,
         None => {
             return failed(
@@ -742,11 +809,11 @@ fn process(
                     output: inference.output.clone(),
                     trace_id,
                 },
-                "Couldn't insert",
+                capture_end.headline(),
                 // Processing succeeded, so what is preserved is the finished
                 // text rather than the raw transcription.
                 failure_detail(
-                    "No destination app was focused when dictation started.",
+                    capture_end.explanation(),
                     &preserve(&inference.output, || Preserved::Processed),
                 ),
             )
@@ -901,6 +968,55 @@ mod tests {
 #[cfg(test)]
 mod preservation_tests {
     use super::*;
+
+    /// The ordinary case, and the only one allowed to type into the document.
+    #[test]
+    fn a_deliberate_release_may_insert() {
+        assert!(CaptureEnd::Released.may_insert());
+    }
+
+    /// An ending the user did not ask for must not place text for them.
+    /// A stuck key recording five minutes of a meeting is exactly the case
+    /// the ceiling exists for, and typing that into their document would be
+    /// worse than the recording itself.
+    #[test]
+    fn an_ending_the_user_did_not_ask_for_never_inserts() {
+        assert!(!CaptureEnd::CeilingReached.may_insert());
+        assert!(!CaptureEnd::BufferFull.may_insert());
+    }
+
+    /// Reaching the ceiling is reported as what it is, and says the words
+    /// were kept rather than leaving the user to guess.
+    #[test]
+    fn the_ceiling_explains_itself_and_says_the_words_were_transcribed() {
+        assert_eq!(CaptureEnd::CeilingReached.headline(), "Recording hit 5 min");
+        let detail = failure_detail(
+            CaptureEnd::CeilingReached.explanation(),
+            &Preserved::Processed,
+        );
+        assert!(detail.contains("five minute recording limit"));
+        assert!(detail.contains("transcribed"));
+        assert!(detail.contains("clipboard"));
+    }
+
+    /// A full buffer loses the end of the dictation, not the beginning, and
+    /// the message has to be honest about which.
+    #[test]
+    fn a_full_buffer_says_the_end_was_lost_and_keeps_the_rest() {
+        let detail = failure_detail(CaptureEnd::BufferFull.explanation(), &Preserved::Processed);
+        assert!(detail.contains("end of what you said was not"));
+        assert!(detail.contains("clipboard"));
+    }
+
+    /// Hitting the ceiling and then failing downstream preserves the raw
+    /// transcript: processing never produced anything better to keep.
+    #[test]
+    fn a_downstream_failure_after_the_ceiling_still_preserves_the_raw_words() {
+        let detail = failure_detail("S1-mini failed to process this LIGHT_CLEANUP utterance.",
+                                    &Preserved::Raw);
+        assert!(detail.contains("raw transcription"));
+        assert!(detail.contains("clipboard"));
+    }
 
     /// The failure that lost the dictation is what the user needs to read.
     /// Preservation is something that also happened, never a replacement.
