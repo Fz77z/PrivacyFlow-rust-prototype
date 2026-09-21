@@ -120,6 +120,10 @@ The transcript is left on the pasteboard afterwards.
 Restoring the previous clipboard on a timer raced the target application's asynchronous paste handling, which could insert the older clipboard contents instead of the dictated text.
 
 LocalFlow records which application was frontmost when dictation started and refuses to insert if a different application is frontmost when the text is ready.
+The transcript is on the pasteboard in that case, so the words are not lost; they need a paste.
+
+The pasteboard is written before anything that can refuse, including the Accessibility check.
+A dictation LocalFlow cannot place for you is exactly the one where you most need the text, so every path from that point leaves it on the clipboard.
 
 ## Interface
 

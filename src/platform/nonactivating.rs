@@ -84,9 +84,19 @@ pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
         return false;
     };
     let class = NonActivatingWindow::class();
+    // The superclass is named statically as NSWindow, which is true of
+    // winit's window class today. If a future winit added an instance
+    // variable it would stop being true, and changing the class of an object
+    // to one of a different size is undefined behaviour. objc2 only checks
+    // that with a debug assertion, which is compiled out of the release build
+    // the user actually runs, so it is checked here instead and refused.
+    if window.class().instance_size() != class.instance_size() {
+        return false;
+    }
     // SAFETY: the class is a direct subclass of NSWindow, adds no instance
-    // variables, and overrides only the two focus predicates. See the module
-    // documentation for why doing this to a live window is sound here.
+    // variables, and overrides only the two focus predicates. The sizes were
+    // just confirmed equal. See the module documentation for why doing this to
+    // a live window is sound here.
     unsafe {
         let object: &AnyObject = &window;
         AnyObject::set_class(object, class);
