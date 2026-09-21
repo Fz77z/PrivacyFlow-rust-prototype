@@ -105,7 +105,11 @@ pub fn show(
     size: CapsuleSize,
     opacity: f32,
 ) -> CapsuleResponse {
-    let rect = Rect::from_min_size(ui.max_rect().min, size.points());
+    // Centred rather than anchored at the corner. The window is always
+    // resized to match `size` before this paints, so the two agree; this is
+    // insurance rather than a fix, so that if they ever disagree again the
+    // capsule degrades into a centred shape instead of a corner-anchored one.
+    let rect = Rect::from_center_size(ui.max_rect().center(), size.points());
     let painter = ui.painter_at(rect);
     let failure = failure_for(state);
     // An unread failure keeps the bead tinted after the dictating capsule has

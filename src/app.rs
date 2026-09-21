@@ -30,6 +30,7 @@ const FAR_RADIUS: f32 = 420.0;
 /// a bead that fades to nothing is an application the user cannot find, which
 /// is the same failure as a capsule restored onto a display that is gone.
 const BEAD_OPACITY_FLOOR: f32 = 0.18;
+const _: () = assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
 
 /// How solid the bead should be, given how far away the pointer is.
 fn bead_opacity(distance: f32) -> f32 {
@@ -102,6 +103,12 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
+    /// The size the window was last resized and repositioned to, in minimal
+    /// mode. `None` until the first resize. Compared against this frame's
+    /// chosen size so that the window is only touched, and `work_areas` only
+    /// queried, on an actual transition between the three sizes rather than
+    /// on every frame.
+    applied_size: Option<ui::capsule::CapsuleSize>,
 }
 
 impl LocalFlowApp {
@@ -199,6 +206,7 @@ impl LocalFlowApp {
             data_dir,
             centre,
             dragging: false,
+            applied_size: None,
         }
     }
 
@@ -397,27 +405,40 @@ impl eframe::App for LocalFlowApp {
             (false, 1.0)
         };
         let size = ui::capsule::size_for(minimal, pointing, self.state.hud != HudState::Idle);
+        let target = size.points();
+        let (width, height) = (target.x, target.y);
+        // Minimal mode off must leave the window exactly alone: no resize,
+        // no reposition, nothing competing with the drag's own commands. That
+        // is what makes minimal mode off identical to today, and it is also
+        // why this whole block, not just the repaint request, is gated here.
         if minimal {
             // Polling the pointer means an idle LocalFlow in minimal mode
             // wakes ten times a second rather than sleeping until an event.
             // That is the price of the proximity fade, and it is paid only
             // while minimal mode is on, which is not the default.
             ctx.request_repaint_after(Duration::from_millis(100));
-        }
-
-        // Animated rather than snapped, so the capsule grows and shrinks
-        // instead of jumping between its three sizes.
-        let target = size.points();
-        let width = ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, 0.14);
-        let height = ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, 0.14);
-        if let Some(centre) = self.centre {
-            let (x, y) = crate::window_position::place(
-                centre,
-                (width, height),
-                &crate::platform::work_areas(),
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+            // The window is snapped straight to the chosen size rather than
+            // tweened towards it. A tween would leave the window and the
+            // capsule `show` paints disagreeing about the size for the
+            // duration of the animation, which is either clipped content on a
+            // grow or a capsule floating inside an oversized window on a
+            // shrink. Only touched, and `work_areas` only asked, on an actual
+            // transition between sizes, since a per-frame `NSScreen::screens`
+            // call for a size that has not changed buys nothing.
+            if self.applied_size != Some(size) {
+                if let Some(centre) = self.centre {
+                    let (x, y) = crate::window_position::place(
+                        centre,
+                        (width, height),
+                        &crate::platform::work_areas(),
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        width, height,
+                    )));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                    self.applied_size = Some(size);
+                }
+            }
         }
 
         // A console buried behind other windows is exactly when someone
@@ -719,13 +740,8 @@ mod tests {
         assert_eq!(bead_opacity(10_000.0), BEAD_OPACITY_FLOOR);
         let middle = bead_opacity((NEAR_RADIUS + FAR_RADIUS) / 2.0);
         assert!(middle > BEAD_OPACITY_FLOOR && middle < 1.0);
-        // Constant-valued on purpose: the invariant belongs in this test, not
-        // only in the constant's doc comment, so a future edit to the floor
-        // that breaks it fails here rather than silently.
-        #[allow(clippy::assertions_on_constants)]
-        {
-            assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
-        }
+        // The floor-is-never-zero invariant is a compile-time assertion next
+        // to the constant, not a runtime one here: see BEAD_OPACITY_FLOOR.
     }
 
     /// Monotonic, so the bead never brightens as the pointer retreats.

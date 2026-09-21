@@ -182,15 +182,19 @@ pub enum Insertion {
 /// measures upwards from the bottom of the primary display, which is the
 /// opposite of everything else here, and a second coordinate convention is
 /// how sign errors get in.
+///
+/// Both failure cases below are programming errors, not runtime conditions:
+/// this is only ever called from the egui update loop on the main thread,
+/// with at least one screen attached. Returning a coordinate in the wrong
+/// space if either ever fired would invert the drag silently, so both panic
+/// instead of quietly handing back a y-up number to a caller that assumes
+/// y-down.
 pub fn pointer_in_window_space() -> (f64, f64) {
     let point = NSEvent::mouseLocation();
-    let Some(marker) = MainThreadMarker::new() else {
-        return (point.x, point.y);
-    };
+    let marker = MainThreadMarker::new()
+        .expect("pointer position must be read on the main thread");
     let screens = NSScreen::screens(marker);
-    let Some(primary) = screens.firstObject() else {
-        return (point.x, point.y);
-    };
+    let primary = screens.firstObject().expect("no screen is attached");
     (point.x, primary.frame().size.height - point.y)
 }
 
