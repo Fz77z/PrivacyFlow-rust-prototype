@@ -72,7 +72,11 @@ pub struct LocalFlowApp {
 }
 
 impl LocalFlowApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: PathBuf,
+        settings: crate::settings::Load,
+    ) -> Self {
         install_visuals(&cc.egui_ctx);
         // The capsule floats over whatever the user is writing in, so clicking
         // it to drag it or to open the console must not take focus away from
@@ -109,10 +113,17 @@ impl LocalFlowApp {
                 )),
             ),
         };
+        // Settings problems are reported last because the other three stop
+        // dictation outright; an unreadable settings file does not.
+        let settings_error = settings
+            .problem
+            .clone()
+            .map(|problem| Failure::blocked("Settings unreadable", problem));
         let mut state = AppState {
             hotkey_installed: hotkey_error.is_none(),
-            microphone_available: microphone.is_some(),
             capsule_non_activating,
+            settings: settings.settings,
+            settings_problem: settings.problem,
             ..Default::default()
         };
         // Losing this is a functional problem, not a cosmetic one: a capsule
@@ -126,7 +137,9 @@ impl LocalFlowApp {
                 "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
             )
         });
-        if let Some(failure) = hotkey_error.or(microphone_error).or(focus_error) {
+        if let Some(failure) =
+            hotkey_error.or(microphone_error).or(focus_error).or(settings_error)
+        {
             // The dot points at the console, so the console has to have
             // something to show when the user follows it. Clearing the dwell
             // timer keeps a startup failure on the capsule indefinitely: there
@@ -359,6 +372,7 @@ impl eframe::App for LocalFlowApp {
                 .with_min_inner_size([520.0, 400.0]);
             let data_dir = self.data_dir.clone();
             let state = &mut self.state;
+            let microphone_name = self.microphone.as_ref().map(|m| m.device_name());
             // Immediate rather than deferred: a deferred viewport's callback must be
             // Fn + Send + Sync + 'static, which would force AppState behind a mutex
             // for no reason other than the signature.
@@ -369,7 +383,7 @@ impl eframe::App for LocalFlowApp {
                     if raise_console {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
-                    ui::console::show(ctx, state, &data_dir)
+                    ui::console::show(ctx, state, &data_dir, microphone_name)
                 },
             );
             if !stay_open {

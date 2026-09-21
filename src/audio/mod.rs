@@ -43,6 +43,7 @@ pub struct Microphone {
     sample_rate: u32,
     level: Arc<AtomicU32>,
     overflowed: Arc<AtomicBool>,
+    device_name: String,
 }
 
 impl Microphone {
@@ -51,6 +52,9 @@ impl Microphone {
         let device = host
             .default_input_device()
             .ok_or_else(|| anyhow!("No input microphone found"))?;
+        let name = device
+            .name()
+            .unwrap_or_else(|_| "unnamed input device".to_owned());
         let supported = device
             .default_input_config()
             .context("Could not read default microphone config")?;
@@ -137,6 +141,7 @@ impl Microphone {
             sample_rate,
             level,
             overflowed,
+            device_name: name,
         })
     }
 
@@ -181,6 +186,17 @@ impl Microphone {
 
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// The device actually being recorded from.
+    ///
+    /// Reported in the console because LocalFlow follows the system input,
+    /// and the system input changing under you is otherwise invisible: a
+    /// Bluetooth headset that is also your output will be forced out of its
+    /// high quality profile every time you dictate, and nothing on screen
+    /// would say why the music broke up.
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
 }
 

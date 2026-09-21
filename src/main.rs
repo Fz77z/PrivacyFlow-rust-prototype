@@ -32,6 +32,7 @@ fn main() -> eframe::Result<()> {
     // how much of this capsule lands on a display.
     let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
     let remembered = window_position::load(&data_dir, size);
+    let settings = settings::load(&data_dir);
     let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
             .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
@@ -52,6 +53,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "LocalFlow",
         options,
-        Box::new(move |cc| Ok(Box::new(app::LocalFlowApp::new(cc, data_dir.clone())))),
+        Box::new(move |cc| {
+            Ok(Box::new(app::LocalFlowApp::new(cc, data_dir.clone(), settings.clone())))
+        }),
     )
 }

@@ -126,6 +126,7 @@ pub enum WorkerStatus {
 pub enum ConsoleTab {
     #[default]
     Activity,
+    Settings,
     Status,
 }
 
@@ -146,13 +147,20 @@ pub struct AppState {
     /// Whether the Right Option watcher actually installed at startup. The
     /// Status tab reports this rather than assuming the binding works.
     pub hotkey_installed: bool,
-    /// Whether a microphone device opened at startup.
-    pub microphone_available: bool,
     /// Whether the capsule's window actually refuses keyboard focus, checked
     /// once at startup by asking the window after it was changed. The class of
     /// a window does not change afterwards, so this does not need re-asking
     /// the way a permission does.
     pub capsule_non_activating: bool,
+    /// What the user has chosen. Loaded once at startup.
+    pub settings: crate::settings::Settings,
+    /// Why the settings file could not be read, if it existed and could not.
+    /// Shown as a banner in the Settings tab, which is where someone who
+    /// wants to fix it will look.
+    pub settings_problem: Option<String>,
+    /// Why the last attempt to save failed. Shown beside the control, because
+    /// a ticked checkbox that did not save is the interface lying.
+    pub settings_write_error: Option<String>,
     /// When the capture was handed to the pipeline, while the capsule is
     /// still showing the state before it. The mirror of `done_at`: that one
     /// retires a state after a delay, this one promotes one.
@@ -179,8 +187,10 @@ impl Default for AppState {
             unread_failure: false,
             worker: WorkerStatus::Starting,
             hotkey_installed: false,
-            microphone_available: false,
             capsule_non_activating: false,
+            settings: Default::default(),
+            settings_problem: None,
+            settings_write_error: None,
             processing_since: None,
             done_at: None,
         }
@@ -541,5 +551,32 @@ mod tests {
     fn the_worker_starts_unknown_and_only_becomes_ready_when_it_says_so() {
         let state = AppState::default();
         assert_eq!(state.worker, WorkerStatus::Starting);
+    }
+
+    /// Activity is what happened and Settings is what LocalFlow does, so the
+    /// console must still open on Activity: adding a tab must not change
+    /// which one a user lands on when they follow the unread dot.
+    #[test]
+    fn the_console_still_opens_on_activity() {
+        assert_eq!(AppState::default().console_tab, ConsoleTab::Activity);
+    }
+
+    /// A settings file that could not be read has to reach the user. It is
+    /// recorded as a failure so the unread dot points at the console, the
+    /// same way every other startup problem is surfaced.
+    #[test]
+    fn an_unreadable_settings_file_is_reported_like_any_other_startup_problem() {
+        let mut state = AppState::default();
+        state.record_failure(Failure::blocked(
+            "Settings unreadable",
+            "Could not read /tmp/settings.json: expected value at line 1 column 3",
+        ));
+        assert!(state.unread_failure);
+        assert!(state.history[0]
+            .failure
+            .as_ref()
+            .unwrap()
+            .detail
+            .contains("settings.json"));
     }
 }
