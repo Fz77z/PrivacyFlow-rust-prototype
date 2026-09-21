@@ -158,7 +158,9 @@ impl LocalFlowApp {
         let focus_error = (!capsule_non_activating).then(|| {
             Failure::blocked(
                 "Capsule takes focus",
-                "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
+                "The capsule could not be stopped from taking keyboard focus. \
+                 Clicking it will move focus away from what you are writing in, \
+                 and the next dictation will report no text field focused.",
             )
         });
         if let Some(failure) =
@@ -176,8 +178,7 @@ impl LocalFlowApp {
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
         start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
-        let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
-        let centre = crate::window_position::load(&data_dir, capsule_size);
+        let centre = crate::window_position::load(&data_dir);
         // Matches what main.rs already decided the window starts at, from the
         // same setting and the same `size_for` rule. Seeded rather than left
         // `None` so "already the right size" is true from the very first
@@ -301,15 +302,6 @@ impl LocalFlowApp {
         self.state.record_failure(failure);
     }
 
-    /// Picks the capsule's size and opacity for this frame, and keeps the
-    /// window in step with whichever size that turns out to be.
-    ///
-    /// Bundled together because minimal mode needs one measurement, the
-    /// pointer's position on screen, to answer three questions: is the user
-    /// pointing at the capsule, how solid should the bead be, and therefore
-    /// which of the three sizes applies. egui cannot supply that measurement
-    /// on its own, since it only reports the pointer relative to a window
-    /// that minimal mode is itself resizing.
     /// Resize the window when, and only when, the minimal mode setting has
     /// changed.
     ///
@@ -358,8 +350,9 @@ impl LocalFlowApp {
         let window = ctx.screen_rect();
         // The capsule sits in the middle of the catchment, and this is the
         // rectangle the user is reaching for. Entering it expands the
-        // capsule; the ring outside it is where the bead brightens on
-        // approach.
+        // capsule. The ring outside it is the lead-in: it is what lets the
+        // window see a pointer coming before it arrives, and it is also the
+        // part that swallows clicks without ever painting anything.
         let reach = egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE);
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         let pointing = match (minimal, pointer) {
@@ -491,13 +484,17 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
-                            // The capsule is painted in the middle of the
-                            // catchment, so the capsule's centre is the
-                            // window's centre whatever size it is drawn at.
-                            let centre = crate::window_position::Centre {
-                                x: position.x + ui::theme::CATCHMENT_SIZE.x / 2.0,
-                                y: position.y + ui::theme::CATCHMENT_SIZE.y / 2.0,
-                            };
+                            // Converted with the size of the window that was
+                            // actually dragged, not with the catchment's.
+                            // Minimal mode off gives a window barely larger
+                            // than the capsule, and using the catchment's
+                            // size there put the remembered centre tens of
+                            // points adrift, once per drag, compounding
+                            // across restarts.
+                            let centre = crate::window_position::centre_of_window(
+                                (position.x, position.y),
+                                (self.window_size.x, self.window_size.y),
+                            );
                             self.centre = Some(centre);
                             crate::window_position::save(&self.data_dir, centre);
                         }

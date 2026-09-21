@@ -32,8 +32,8 @@ pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 /// macOS delivers mouse events for, so it is also the area within which the
 /// capsule can notice someone approaching, and the user asked for expansion
 /// on approach rather than on contact. A catchment the size of the expanded
-/// capsule could not do that: the bead is 14 points tall inside it, so
-/// vertically "close" and "on" would be the same thing.
+/// capsule could not do that: the bead is a fraction of the capsule's height,
+/// so vertically "close" and "on" would be very nearly the same thing.
 ///
 /// The cost is that clicks anywhere in here are swallowed, including the ring
 /// this leaves outside the expanded capsule. Most of the area conceals that
@@ -41,6 +41,11 @@ pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 /// fill the middle, but the ring is real and is the first number to revisit
 /// if it proves annoying.
 pub const CATCHMENT_SIZE: Vec2 = Vec2::new(320.0, 120.0);
+
+/// How much room the capsule's outline needs outside the shape it draws
+/// around. The stroke is one point wide and centred half a point out, so it
+/// occupies one point; this is that with a point to spare.
+pub const EDGE_ROOM: f32 = 2.0;
 
 /// The window size for a given setting.
 ///
@@ -52,7 +57,11 @@ pub fn window_size(minimal_mode: bool) -> Vec2 {
     if minimal_mode {
         CATCHMENT_SIZE
     } else {
-        CAPSULE_SIZE
+        // Not exactly the capsule. The outline is drawn outside the shape, so
+        // a window sized to the shape clips it away entirely and the capsule
+        // loses its border. The slack is invisible and small enough that the
+        // clicks it swallows are ones aimed at the capsule's own edge.
+        CAPSULE_SIZE + Vec2::splat(EDGE_ROOM * 2.0)
     }
 }
 

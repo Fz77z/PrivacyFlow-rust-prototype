@@ -32,8 +32,6 @@ impl CapsuleSize {
             CapsuleSize::Full => theme::CAPSULE_SIZE,
         }
     }
-
-
 }
 
 /// What the capsule is entitled to be right now.
@@ -90,9 +88,7 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
     }
 }
 
-/// Draws the whole widget. The capsule is the window, so this paints every
-/// pixel the user sees: there is no title bar above it.
-/// Paints the capsule into the middle of the catchment window.
+/// Paints the capsule into the middle of its window.
 ///
 /// `painted` is the size to draw at, which is animated and so is usually
 /// between the three fixed sizes. `layout` is which of the three arrangements
@@ -167,19 +163,6 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     CapsuleResponse { action, dragging: body.dragged() || body.drag_started() }
 }
 
-
-/// The dictating capsule. Only the mark: at 84 by 28 there is no room for the
-/// label, and the mark is the part that has to stay legible while someone is
-/// actually speaking.
-///
-/// The mark box is 22 by 18, not a uniform scale of the 36 by 30 box the mark
-/// was designed against: a uniform scale that fits the 28pt capsule height
-/// would also widen the bars past what the height leaves room for. Bar width
-/// against the tallest bar's height is about 5:1 at 36x30 and about 4.9:1 at
-/// 22x18, which keeps the silhouette; 22 is close to the largest width a
-/// uniform scale of the 28pt capsule height allows, leaving 5pt above and
-/// below, and the last bar's right edge lands at 19.60 inside 22.0, so
-/// nothing clips.
 /// The cog, which is the console icon. One stroke weight throughout, kept
 /// thin: the glyph is small and a heavy line turns it into a drawing of a
 /// cog rather than an icon of one.
@@ -218,15 +201,15 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// the animation passes through, rather than only at the three it rests at.
 fn mark_rect_for(rect: Rect) -> Rect {
     let to_full = progress(rect.width(), theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
+    // The mark scales with the capsule's height, so the widget keeps its
+    // proportions at every point of the animation rather than holding a fixed
+    // mark inside a changing shell.
+    let scale = rect.height() / theme::CAPSULE_SIZE.y;
     // Clamped to fit whatever it is being painted into, so the function is
     // total. Nothing clamps it at the three resting sizes, which are all
     // built around this mark, but a geometry function that is only correct
     // for the inputs it happens to be given is a trap for whoever changes the
     // animation next.
-    // The mark scales with the capsule's height, so the widget keeps its
-    // proportions at every point of the animation rather than holding a
-    // fixed mark inside a changing shell.
-    let scale = rect.height() / theme::CAPSULE_SIZE.y;
     let room = rect.shrink(MARK_INSET);
     let size = Vec2::new(
         (theme::MARK_SIZE.x * scale).min(room.width()),
@@ -534,7 +517,14 @@ mod tests {
     /// The label lives between the mark and the cog, and narrowing the
     /// capsule squeezes it from both sides without anything complaining. The
     /// longest string it has to hold is "Loading models", which the worker
-    /// shows for the ten or so seconds the models take to load.
+    /// shows for the ten or so seconds the models take to load, and which is
+    /// therefore invisible in any screenshot of an idle capsule.
+    ///
+    /// The number is a geometric budget, not a measurement: this asserts that
+    /// the gap exists, not that a particular font fits in it. "Loading
+    /// models" is fourteen characters and renders near 91 points at the
+    /// current label font, so 100 leaves a little room; changing the font
+    /// size or the string without re-measuring would slip past this.
     #[test]
     fn the_full_capsule_leaves_room_for_its_longest_label() {
         let capsule = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::CAPSULE_SIZE);

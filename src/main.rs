@@ -32,7 +32,7 @@ fn main() -> eframe::Result<()> {
     // The size is passed in rather than assumed, because the check is about
     // how much of this capsule lands on a display.
     let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
-    let remembered = window_position::load(&data_dir, size);
+    let remembered = window_position::load(&data_dir);
     let settings = settings::load(&data_dir);
     // The window changes size only when the minimal mode setting is toggled,
     // never while the capsule is animating. With minimal mode on it is the
