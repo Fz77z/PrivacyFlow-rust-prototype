@@ -3,6 +3,7 @@ mod audio;
 mod instance;
 mod platform;
 mod router;
+mod settings;
 mod state;
 mod ui;
 mod window_position;
