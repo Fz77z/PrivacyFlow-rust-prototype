@@ -33,13 +33,22 @@ impl CapsuleSize {
         }
     }
 
-    pub fn radius(self) -> f32 {
-        match self {
-            CapsuleSize::Bead => theme::BEAD_RADIUS,
-            CapsuleSize::Active => theme::ACTIVE_RADIUS,
-            CapsuleSize::Full => theme::CAPSULE_RADIUS,
+    /// The largest arrangement that fits in a shape this wide.
+    ///
+    /// The capsule is animated between sizes, so most frames are drawn at a
+    /// width that is not one of the three. Choosing the layout from the width
+    /// actually being drawn is what stops a half grown capsule painting a
+    /// label into a shape too small to hold it.
+    pub fn for_width(width: f32) -> Self {
+        if width >= CapsuleSize::Full.points().x {
+            CapsuleSize::Full
+        } else if width >= CapsuleSize::Active.points().x {
+            CapsuleSize::Active
+        } else {
+            CapsuleSize::Bead
         }
     }
+
 }
 
 /// What the capsule is entitled to be right now.
@@ -98,18 +107,24 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
 
 /// Draws the whole widget. The capsule is the window, so this paints every
 /// pixel the user sees: there is no title bar above it.
+/// Paints the capsule into the middle of the catchment window.
+///
+/// `painted` is the size to draw at, which is animated and so is usually
+/// between the three fixed sizes. `layout` is which of the three arrangements
+/// to draw, chosen from the size actually being drawn rather than the one
+/// being animated towards, so a half grown capsule never paints a label into
+/// a shape too small to hold it.
 pub fn show(
     ui: &mut Ui,
     state: &AppState,
     time: f64,
-    size: CapsuleSize,
+    painted: Vec2,
+    layout: CapsuleSize,
     opacity: f32,
 ) -> CapsuleResponse {
-    // Centred rather than anchored at the corner. The window is always
-    // resized to match `size` before this paints, so the two agree; this is
-    // insurance rather than a fix, so that if they ever disagree again the
-    // capsule degrades into a centred shape instead of a corner-anchored one.
-    let rect = Rect::from_center_size(ui.max_rect().center(), size.points());
+    // The window is the catchment and never changes size, so the capsule is
+    // centred inside it rather than filling it.
+    let rect = Rect::from_center_size(ui.max_rect().center(), painted);
     let painter = ui.painter_at(rect);
     let failure = failure_for(state);
     // An unread failure keeps the bead tinted after the dictating capsule has
@@ -120,7 +135,7 @@ pub fn show(
     // less than full opacity would composite to a visibly more opaque bead
     // than the fade asks for, and the bead's tint would blend with the
     // ordinary border underneath it instead of replacing it.
-    let border = if size == CapsuleSize::Bead && state.unread_failure {
+    let border = if layout == CapsuleSize::Bead && state.unread_failure {
         theme::ERROR
     } else {
         border_for(state, failure.is_some())
@@ -128,9 +143,12 @@ pub fn show(
     // Everything is painted through this, so the proximity fade is one
     // multiplication rather than an alpha threaded through every call.
     let fade = |color: Color32| color.gamma_multiply(opacity);
+    // All three sizes are pills, so the radius is half the height at every
+    // point of the animation. Interpolating between the three fixed radii
+    // would be a second thing that has to agree with the first.
     painter.rect(
         rect.shrink(0.5),
-        Rounding::same(size.radius()),
+        Rounding::same(rect.height() / 2.0),
         fade(theme::FILL),
         Stroke::new(1.0, fade(border)),
     );
@@ -141,10 +159,11 @@ pub fn show(
     let settled = drag_window(ui, &body);
     let mut action = settled.map(CapsuleAction::Moved);
 
-    match size {
-        // The shell above is the whole bead; there is nothing left to paint.
-        CapsuleSize::Bead => {}
-        CapsuleSize::Active => paint_active(&painter, rect, state, time, opacity),
+    match layout {
+        CapsuleSize::Bead => paint_mark(&painter, rect, state, time, opacity, theme::BEAD_MARK_SIZE),
+        CapsuleSize::Active => {
+            paint_mark(&painter, rect, state, time, opacity, theme::ACTIVE_MARK_SIZE)
+        }
         CapsuleSize::Full => paint_full(ui, &painter, rect, state, time, opacity, &mut action),
     }
 
@@ -265,12 +284,29 @@ fn paint_full(
 /// uniform scale of the 28pt capsule height allows, leaving 5pt above and
 /// below, and the last bar's right edge lands at 19.60 inside 22.0, so
 /// nothing clips.
-fn paint_active(painter: &egui::Painter, rect: Rect, state: &AppState, time: f64, opacity: f32) {
+/// The mark alone, centred, at whatever size the shape can hold.
+///
+/// Both the bead and the dictating capsule are just the mark: at 46x14 and
+/// at 84x28 there is no room for the label, and the mark is the part that
+/// carries the state. Sharing one painter is what makes growing from one to
+/// the other a continuous scale of the same shape rather than a swap.
+///
+/// At bead size the three failure kinds stop being distinguishable, because
+/// the bar shapes are too small to read. That was accepted knowingly: colour
+/// still separates a failure from a success, and reaching for the capsule
+/// brings back the detail.
+fn paint_mark(
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &AppState,
+    time: f64,
+    opacity: f32,
+    mark_size: Vec2,
+) {
     let failure = failure_for(state);
-    let mark_rect = Rect::from_center_size(rect.center(), Vec2::new(22.0, 18.0));
     mark::paint(
         painter,
-        mark_rect,
+        Rect::from_center_size(rect.center(), mark_size),
         &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
         state.mic_level,
         time,
@@ -429,6 +465,38 @@ mod tests {
         assert_eq!(size_for(true, false, false), CapsuleSize::Bead);
         assert_eq!(size_for(true, false, true), CapsuleSize::Active);
         assert_eq!(size_for(true, true, false), CapsuleSize::Full);
+    }
+
+    /// The capsule is animated between sizes, so most frames are drawn at a
+    /// width that is not one of the three. A layout wider than the shape
+    /// being drawn paints a label off the end of it, which is what this
+    /// stops.
+    #[test]
+    fn the_layout_never_claims_more_width_than_the_shape_being_drawn() {
+        let mut width = theme::BEAD_SIZE.x;
+        while width <= theme::CAPSULE_SIZE.x {
+            let layout = CapsuleSize::for_width(width);
+            assert!(
+                layout.points().x <= width,
+                "at {width} points wide the layout wanted {} points",
+                layout.points().x
+            );
+            width += 0.5;
+        }
+    }
+
+    /// And it must reach each layout as soon as there is room for it, or the
+    /// capsule finishes growing and keeps drawing the smaller arrangement.
+    #[test]
+    fn each_layout_arrives_as_soon_as_it_fits() {
+        assert_eq!(CapsuleSize::for_width(theme::BEAD_SIZE.x), CapsuleSize::Bead);
+        assert_eq!(CapsuleSize::for_width(theme::ACTIVE_SIZE.x), CapsuleSize::Active);
+        assert_eq!(CapsuleSize::for_width(theme::CAPSULE_SIZE.x), CapsuleSize::Full);
+        assert_eq!(
+            CapsuleSize::for_width(theme::ACTIVE_SIZE.x - 0.1),
+            CapsuleSize::Bead,
+            "a hair too narrow for the dictating mark stays a bead"
+        );
     }
 
     /// Largest claim wins. Pointing at the capsule during a dictation must

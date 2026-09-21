@@ -1,23 +1,46 @@
 use egui::{Color32, FontFamily, FontId, Vec2};
 
-/// The capsule is a fixed shape. Every state paints into these same metrics,
-/// so nothing in the widget can move or resize between states.
+/// The three shapes the capsule is painted as. All of them are pills, so
+/// none of them carries a radius: the radius is half the painted height at
+/// every point of the animation between them, and a stored radius would be a
+/// second thing that has to agree with the first.
 pub const CAPSULE_SIZE: Vec2 = Vec2::new(240.0, 56.0);
-pub const CAPSULE_RADIUS: f32 = 28.0;
 pub const PAD_LEFT: f32 = 17.0;
 pub const PAD_RIGHT: f32 = 10.0;
 pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
-/// The bead: the capsule at rest in minimal mode. Too small for the mark or
-/// the label, so it carries state through colour alone.
+/// The bead: the capsule at rest in minimal mode. Too small for the label,
+/// but it still carries the mark, shrunk until the bars read as dots.
 pub const BEAD_SIZE: Vec2 = Vec2::new(46.0, 14.0);
-pub const BEAD_RADIUS: f32 = 7.0;
+/// The mark inside the bead. The failure kinds are not distinguishable at
+/// this size, which the ambient spec accepted knowingly; what survives is
+/// that something is there and what colour it is.
+pub const BEAD_MARK_SIZE: Vec2 = Vec2::new(20.0, 8.0);
+/// The mark inside the dictating capsule. Very nearly a uniform scale of
+/// MARK_SIZE, which is what keeps the bars from looking clubbed: width
+/// against height for the tallest bar stays near 5:1, as it is at full size.
+pub const ACTIVE_MARK_SIZE: Vec2 = Vec2::new(22.0, 18.0);
 /// The dictating size. Big enough for the mark, which is the part that has to
 /// stay legible while the user is speaking.
 pub const ACTIVE_SIZE: Vec2 = Vec2::new(84.0, 28.0);
-pub const ACTIVE_RADIUS: f32 = 14.0;
+
+/// The window itself, which never changes size.
+///
+/// Larger than the full capsule on purpose. The window is the only thing
+/// macOS delivers mouse events for, so it is also the area within which the
+/// capsule can notice someone approaching, and the user asked for expansion
+/// on approach rather than on contact. A catchment the size of the expanded
+/// capsule could not do that: the bead is 14 points tall inside it, so
+/// vertically "close" and "on" would be the same thing.
+///
+/// The cost is that clicks anywhere in here are swallowed, including the ring
+/// this leaves outside the expanded capsule. Most of the area conceals that
+/// cost, because a pointer inside it is exactly what expands the capsule to
+/// fill the middle, but the ring is real and is the first number to revisit
+/// if it proves annoying.
+pub const CATCHMENT_SIZE: Vec2 = Vec2::new(320.0, 120.0);
 
 // The surfaces are a neutral near black. An earlier palette tinted them
 // blue, which quietly fought every other colour in the widget: the greens

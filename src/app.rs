@@ -20,10 +20,15 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 /// dictation, which takes about a second, still reads as instant feedback.
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
-/// Within this distance of the capsule's centre the bead is solid.
-const NEAR_RADIUS: f32 = 120.0;
-/// Beyond this distance it has faded as far as it goes.
-const FAR_RADIUS: f32 = 420.0;
+/// Distance is measured from the edge of the rectangle the user is reaching
+/// for, not from a centre, so the bead is solid the moment the pointer is
+/// about to arrive.
+const NEAR_RADIUS: f32 = 0.0;
+/// Where it has faded as far as it goes. This is the ring between the full
+/// capsule and the edge of the catchment, so it is short by design: the
+/// pointer leaving the catchment entirely reports an infinite distance and
+/// lands on the floor.
+const FAR_RADIUS: f32 = 44.0;
 /// How faint the bead is allowed to get.
 ///
 /// Deliberately not zero. LocalFlow has no Dock icon and no menu bar item, so
@@ -31,6 +36,17 @@ const FAR_RADIUS: f32 = 420.0;
 /// is the same failure as a capsule restored onto a display that is gone.
 const BEAD_OPACITY_FLOOR: f32 = 0.18;
 const _: () = assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
+
+/// How long the capsule takes to change size. This is drawing, not an
+/// operating system window resize, so it is eased at the display's rate.
+const GROW_SECONDS: f32 = 0.18;
+
+/// How far a point is from a rectangle, and zero inside it.
+fn distance_to_rect(rect: egui::Rect, point: egui::Pos2) -> f32 {
+    let dx = (rect.min.x - point.x).max(point.x - rect.max.x).max(0.0);
+    let dy = (rect.min.y - point.y).max(point.y - rect.max.y).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
 
 /// How solid the bead should be, given how far away the pointer is.
 fn bead_opacity(distance: f32) -> f32 {
@@ -103,15 +119,6 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
-    /// The size the window is currently resized to. Seeded at construction
-    /// from the size the window actually starts at (which `main.rs` decides
-    /// from the same setting), then kept in step whenever the window is
-    /// resized. Compared against this frame's chosen size so the window is
-    /// only touched, and `work_areas` only queried, on an actual transition
-    /// between the three sizes, and this holds regardless of whether minimal
-    /// mode is currently on or off: it also covers being switched off while
-    /// the window is not yet full size.
-    applied_size: Option<ui::capsule::CapsuleSize>,
 }
 
 impl LocalFlowApp {
@@ -202,7 +209,6 @@ impl LocalFlowApp {
         // `None` so "already the right size" is true from the very first
         // frame: an unseeded `None` would read as a change on frame one and
         // immediately resize a window that was already correct.
-        let applied_size = Some(ui::capsule::size_for(state.settings.minimal_mode, false, false));
         Self {
             state,
             microphone,
@@ -215,7 +221,6 @@ impl LocalFlowApp {
             data_dir,
             centre,
             dragging: false,
-            applied_size,
         }
     }
 
@@ -329,85 +334,69 @@ impl LocalFlowApp {
     /// which of the three sizes applies. egui cannot supply that measurement
     /// on its own, since it only reports the pointer relative to a window
     /// that minimal mode is itself resizing.
-    fn choose_shape(&mut self, ctx: &egui::Context) -> (ui::capsule::CapsuleSize, f32) {
-        // Minimal mode has to know where the pointer is even when it is
-        // outside the window, which egui cannot report: it measures relative
-        // to the window, and a window that resizes under the cursor perturbs
-        // the very number deciding whether it should resize.
+    /// What the capsule should be painted as, and how solid.
+    ///
+    /// Returns the painted size, which is animated and so may be between the
+    /// three fixed sizes, the layout to draw at that size, and the opacity.
+    ///
+    /// The window never changes size, so nothing here touches the viewport.
+    /// The pointer comes from egui rather than from the screen, because the
+    /// window is now the catchment and receives real move events across the
+    /// whole of it, including the parts it does not paint.
+    fn choose_shape(&mut self, ctx: &egui::Context) -> (egui::Vec2, ui::capsule::CapsuleSize, f32) {
         let minimal = self.state.settings.minimal_mode;
-        let (pointing, distance) = if minimal {
-            let (px, py) = crate::platform::pointer_in_window_space();
-            let rect = ctx.input(|i| i.viewport().outer_rect);
-            let pointing = rect.is_some_and(|rect| {
-                rect.contains(egui::pos2(px as f32, py as f32))
-            }) || self.dragging;
-            let distance = self
-                .centre
-                .map(|centre| {
-                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
-                })
-                .unwrap_or(0.0);
-            (pointing, distance)
-        } else {
-            (false, 0.0)
+        let window = ctx.screen_rect();
+        // The capsule sits in the middle of the catchment, and this is the
+        // rectangle the user is reaching for. Entering it expands the
+        // capsule; the ring outside it is where the bead brightens on
+        // approach.
+        let reach = egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE);
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let (pointing, distance) = match (minimal, pointer) {
+            (false, _) => (false, 0.0),
+            (true, Some(pos)) => (reach.contains(pos) || self.dragging, distance_to_rect(reach, pos)),
+            // No pointer means it is outside the catchment entirely, which is
+            // as far away as this can tell.
+            (true, None) => (self.dragging, f32::INFINITY),
         };
         // A dictation that has not yet retired counts as active, with one
         // exception: a startup failure deliberately clears `done_at` so it
-        // never retires on its own (see `new`, where `hotkey_error.or(...)`
-        // is recorded). Without carving that out, `active` would stay true
-        // for the rest of the session, which would pin a minimal-mode capsule
-        // at the dictating size forever with no user action behind it, the
-        // governing rule inverted. Every mid-dictation failure goes through
-        // `record_failure` and then `settle`, which sets `done_at`, so this
-        // only ever excludes the startup case.
+        // never retires on its own. Without carving that out, `active` would
+        // stay true for the rest of the session, pinning a minimal-mode
+        // capsule at the dictating size forever with no user action behind
+        // it, the governing rule inverted. Every mid-dictation failure goes
+        // through `record_failure` and then `settle`, which sets `done_at`.
         let active = self.state.hud != HudState::Idle
             && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
         let size = ui::capsule::size_for(minimal, pointing, active);
-        // The proximity fade is a property of the bead, not of the capsule as
-        // a whole: `Full` happens to be safe either way, since pointing at it
-        // implies zero distance, but `Active` is not, and a dictation with
+        // The proximity fade belongs to the bead alone. `Full` is safe either
+        // way, since reaching it implies zero distance, but a dictation with
         // the pointer parked elsewhere must stay fully legible rather than
-        // fading to the floor.
+        // fading toward the floor.
         let opacity =
             if size == ui::capsule::CapsuleSize::Bead { bead_opacity(distance) } else { 1.0 };
-        if minimal {
-            // Polling the pointer means an idle LocalFlow in minimal mode
-            // wakes ten times a second rather than sleeping until an event.
-            // That is the price of the proximity fade, and it is paid only
-            // while minimal mode is on, which is not the default. This is the
-            // one thing that is genuinely specific to minimal mode being on;
-            // the resize below is not, and must not be gated the same way.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-        // Snapped straight to the chosen size rather than tweened towards it,
-        // so the window and the capsule `show` paints can never disagree
-        // about the size. Resized only on an actual transition to `size`,
-        // regardless of whether minimal mode is on right now, so switching it
-        // off restores a shrunk window instead of leaving it stuck.
+        // Animated, because this is now drawing rather than an operating
+        // system window resize. Both axes are eased on the same clock, so the
+        // capsule cannot shear.
         let target = size.points();
-        if self.applied_size != Some(size) {
-            if let Some(centre) = self.centre {
-                let (x, y) = crate::window_position::place(
-                    centre,
-                    (target.x, target.y),
-                    &crate::platform::work_areas(),
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                    target.x, target.y,
-                )));
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
-                self.applied_size = Some(size);
-            }
-        }
-        (size, opacity)
+        let painted = egui::vec2(
+            ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, GROW_SECONDS),
+            ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, GROW_SECONDS),
+        );
+        // The layout follows the size actually being drawn rather than the
+        // one being animated towards, so a half grown capsule never paints a
+        // label into a window too small to hold it.
+        (painted, ui::capsule::CapsuleSize::for_width(painted.x), opacity)
     }
 }
 
 impl eframe::App for LocalFlowApp {
     /// The capsule paints its own shape into a transparent window, so the
-    /// window itself must contribute nothing. eframe's default clear colour is
-    /// a 70% opaque near-black across the whole viewport, which shows up as a
-    /// rectangle around the capsule's rounded corners.
+    /// window itself must contribute nothing. eframe's default clear colour
+    /// is a 70% opaque near-black across the whole viewport, which would show
+    /// up as a rectangle around the capsule's rounded corners, and now that
+    /// the window is a catchment much larger than the capsule it would show
+    /// up as a rectangle around a great deal of empty space.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
@@ -474,9 +463,7 @@ impl eframe::App for LocalFlowApp {
             }
         }
 
-        let (size, opacity) = self.choose_shape(ctx);
-        let target = size.points();
-        let (width, height) = (target.x, target.y);
+        let (painted, layout, opacity) = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
@@ -484,8 +471,14 @@ impl eframe::App for LocalFlowApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                let response =
-                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), size, opacity);
+                let response = ui::capsule::show(
+                    ui,
+                    &self.state,
+                    ui.input(|i| i.time),
+                    painted,
+                    layout,
+                    opacity,
+                );
                 self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {
@@ -504,9 +497,12 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
+                            // The capsule is painted in the middle of the
+                            // catchment, so the capsule's centre is the
+                            // window's centre whatever size it is drawn at.
                             let centre = crate::window_position::Centre {
-                                x: position.x + width / 2.0,
-                                y: position.y + height / 2.0,
+                                x: position.x + ui::theme::CATCHMENT_SIZE.x / 2.0,
+                                y: position.y + ui::theme::CATCHMENT_SIZE.y / 2.0,
                             };
                             self.centre = Some(centre);
                             crate::window_position::save(&self.data_dir, centre);
