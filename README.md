@@ -66,17 +66,25 @@ The signature matters for the same reason.
 Every rebuild changes that hash, so every rebuild looked like a different application with none of the previous one's permissions.
 The certificate has nothing to do with trust or distribution; it exists so successive builds present the same identity to this machine.
 
-### Input Monitoring has to be added by hand
+### Two permissions have to be added by hand
 
-LocalFlow will not prompt for it.
-The hotkey uses a listen-only event tap, and macOS does not reliably raise a permission prompt for those.
-It simply delivers a reduced event stream instead, which looks exactly like the hotkey working only while LocalFlow is the focused application.
+LocalFlow prompts for the microphone and for nothing else.
+The other two must be added manually in System Settings, Privacy and Security, using the plus button to select `/Applications/LocalFlow.app`.
 
-Add it manually in System Settings, Privacy and Security, Input Monitoring, using the plus button to select `/Applications/LocalFlow.app`.
-Then quit and relaunch LocalFlow, because the tap is created at startup and does not pick up a grant made while it is running.
+| Permission | Needed for | Symptom when missing |
+| --- | --- | --- |
+| Input Monitoring | Seeing the hotkey while another application is focused | The hotkey only works while LocalFlow itself is focused |
+| Accessibility | Synthesizing the Cmd-V that inserts the text | Dictation transcribes but nothing appears at the cursor |
+| Microphone | Capturing audio. This one does prompt, on the first capture | Capture returns silence, reported as audio too short or quiet |
 
-Do not run `tccutil reset ListenEvent com.privacy.dictation` expecting a fresh prompt.
-It removes the entry and nothing re-creates it, which leaves the app quietly unable to see the hotkey.
+Neither of the first two announces itself.
+The hotkey uses a listen-only event tap, and macOS does not reliably raise a prompt for those: it delivers a reduced event stream instead, so the app looks like it is working rather than like it is blocked.
+
+Quit and relaunch LocalFlow after granting either one.
+The event tap is created at startup and does not pick up a grant made while the app is running.
+
+Do not run `tccutil reset` against these expecting a fresh prompt.
+It removes the entry and nothing re-creates it, which leaves the app quietly unable to see the hotkey or to insert text.
 
 The app has no Dock icon by design.
 It is a floating widget, so it is quit from the capsule's right-click menu or from the console window.
