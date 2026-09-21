@@ -11,20 +11,24 @@ pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
-/// The bead: the capsule at rest in minimal mode. Too small for the label,
-/// but it still carries the mark, shrunk until the bars read as dots.
-pub const BEAD_SIZE: Vec2 = Vec2::new(46.0, 14.0);
-/// The mark inside the bead. The failure kinds are not distinguishable at
-/// this size, which the ambient spec accepted knowingly; what survives is
-/// that something is there and what colour it is.
-pub const BEAD_MARK_SIZE: Vec2 = Vec2::new(20.0, 8.0);
+/// The bead: the capsule at rest in minimal mode. Too narrow for the label,
+/// but it carries the mark at nearly full height, so the bars read as marks
+/// rather than as specks. It shares its height with the dictating size to
+/// within a few points on purpose: starting to speak should widen the capsule
+/// and lift it very slightly, not appear to replace it with a larger one.
+pub const BEAD_SIZE: Vec2 = Vec2::new(48.0, 28.0);
+/// The mark inside the bead. The failure kinds are still not distinguishable
+/// here, which the ambient spec accepted knowingly; what survives is that
+/// something is there, and what colour it is.
+pub const BEAD_MARK_SIZE: Vec2 = Vec2::new(24.0, 14.0);
 /// The mark inside the dictating capsule. Very nearly a uniform scale of
 /// MARK_SIZE, which is what keeps the bars from looking clubbed: width
 /// against height for the tallest bar stays near 5:1, as it is at full size.
-pub const ACTIVE_MARK_SIZE: Vec2 = Vec2::new(22.0, 18.0);
-/// The dictating size. Big enough for the mark, which is the part that has to
-/// stay legible while the user is speaking.
-pub const ACTIVE_SIZE: Vec2 = Vec2::new(84.0, 28.0);
+pub const ACTIVE_MARK_SIZE: Vec2 = Vec2::new(28.0, 17.0);
+/// The dictating size. A step up from the bead rather than a different
+/// object: four points taller and not quite twice as wide, so beginning to
+/// speak reads as the capsule opening up rather than as a new thing arriving.
+pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 32.0);
 
 /// The window itself, which never changes size.
 ///

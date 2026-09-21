@@ -168,6 +168,10 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
 /// uniform scale of the 28pt capsule height allows, leaving 5pt above and
 /// below, and the last bar's right edge lands at 19.60 inside 22.0, so
 /// nothing clips.
+/// The smallest gap kept between the mark and the capsule's edge, so the
+/// mark never touches the border even when it has to be clamped to fit.
+const MARK_INSET: f32 = 3.0;
+
 /// How far `value` has travelled from `from` to `to`, clamped to 0 and 1.
 fn progress(value: f32, from: f32, to: f32) -> f32 {
     ((value - from) / (to - from)).clamp(0.0, 1.0)
@@ -201,11 +205,22 @@ fn mark_rect_for(rect: Rect) -> Rect {
             lerp(theme::BEAD_MARK_SIZE.y, theme::ACTIVE_MARK_SIZE.y, to_active),
         )
     };
+    // Clamped to fit whatever it is being painted into. The size above is a
+    // function of the capsule's width alone, so a capsule that is wide and
+    // short would otherwise be given a mark taller than itself. Width and
+    // height animate on one clock and so stay in step today, which makes that
+    // unreachable rather than impossible, and a geometry function that is
+    // only correct for the inputs it happens to be given is a trap for
+    // whoever changes the animation next. None of this binds at the three
+    // resting sizes, so it changes nothing visible.
+    let room = rect.shrink(MARK_INSET);
+    let size = Vec2::new(size.x.min(room.width()), size.y.min(room.height()));
     let centre_x = lerp(
         rect.center().x,
         rect.left() + theme::PAD_LEFT + size.x / 2.0,
         to_full,
-    );
+    )
+    .clamp(room.left() + size.x / 2.0, room.right() - size.x / 2.0);
     Rect::from_center_size(Pos2::new(centre_x, rect.center().y), size)
 }
 
@@ -455,26 +470,27 @@ mod tests {
     }
 
 
-    /// The capsule is animated, so it is drawn at hundreds of widths between
-    /// the three it rests at. The mark has to stay inside it at every one of
-    /// them: a mark that overhangs is the snap this geometry exists to
-    /// remove, wearing a different shape.
+    /// The capsule is animated, so it is drawn at hundreds of sizes between
+    /// the three it rests at, and an animation interrupted part way leaves
+    /// the width and the height at different points of their travel. The
+    /// mark has to stay inside it at every combination: a mark that overhangs
+    /// is the snap this geometry exists to remove, wearing a different shape.
     #[test]
-    fn the_mark_stays_inside_the_capsule_at_every_width_of_the_animation() {
+    fn the_mark_stays_inside_the_capsule_at_every_size_of_the_animation() {
         let mut width = theme::BEAD_SIZE.x;
         while width <= theme::CAPSULE_SIZE.x {
-            let height = theme::BEAD_SIZE.y
-                + (theme::CAPSULE_SIZE.y - theme::BEAD_SIZE.y)
-                    * (width - theme::BEAD_SIZE.x)
-                    / (theme::CAPSULE_SIZE.x - theme::BEAD_SIZE.x);
-            let capsule =
-                Rect::from_center_size(Pos2::new(500.0, 500.0), Vec2::new(width, height));
-            let mark = mark_rect_for(capsule);
-            assert!(
-                capsule.contains_rect(mark),
-                "at {width} by {height} the mark {mark:?} escaped the capsule {capsule:?}"
-            );
-            width += 0.5;
+            let mut height = theme::BEAD_SIZE.y;
+            while height <= theme::CAPSULE_SIZE.y {
+                let capsule =
+                    Rect::from_center_size(Pos2::new(500.0, 500.0), Vec2::new(width, height));
+                let mark = mark_rect_for(capsule);
+                assert!(
+                    capsule.contains_rect(mark),
+                    "at {width} by {height} the mark {mark:?} escaped the capsule {capsule:?}"
+                );
+                height += 2.0;
+            }
+            width += 2.0;
         }
     }
 
