@@ -27,11 +27,13 @@ fn main() -> eframe::Result<()> {
 
     // Restored before the window exists, because moving it afterwards would
     // show the capsule in one place and then jump it to another.
-    let remembered = window_position::load(&data_dir);
+    // The size is passed in rather than assumed, because the check is about
+    // how much of this capsule lands on a display.
+    let remembered = window_position::load(&data_dir, (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y));
     let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([240.0, 56.0])
-            .with_min_inner_size([240.0, 56.0])
-            .with_max_inner_size([240.0, 56.0])
+            .with_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
+            .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
+            .with_max_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
             .with_resizable(false)
             .with_decorations(false)
             .with_transparent(true)

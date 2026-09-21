@@ -6,8 +6,9 @@ use core_graphics::event::{
     CGEventType, EventField, KeyCode,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use objc2_app_kit::{NSEvent, NSWorkspace};
+use objc2_app_kit::{NSEvent, NSScreen, NSWorkspace};
 use core_foundation::base::TCFType;
+use objc2_foundation::MainThreadMarker;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -184,6 +185,51 @@ pub enum Insertion {
 pub fn pointer_on_screen() -> (f64, f64) {
     let point = NSEvent::mouseLocation();
     (point.x, point.y)
+}
+
+/// A display's usable area: the screen minus the menu bar and the Dock.
+///
+/// Expressed in the same coordinates window positions use, with the origin at
+/// the top left of the primary display and y increasing downwards, so it can
+/// be compared against a remembered position without converting either.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkArea {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Where the user can actually see things, one entry per connected display.
+///
+/// An empty result means the question could not be asked, not that there are
+/// no displays. Callers must treat it as "unknown" rather than as "nowhere is
+/// valid" or "anywhere is valid".
+pub fn work_areas() -> Vec<WorkArea> {
+    let Some(marker) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let screens = NSScreen::screens(marker);
+    // AppKit's coordinates start at the bottom left of the primary display,
+    // which is the first screen, and every other display is placed relative to
+    // it. Flipping to downward-y therefore measures from that one screen's
+    // height, which is also what winit does when it places a window.
+    let Some(primary) = screens.firstObject() else {
+        return Vec::new();
+    };
+    let primary_height = primary.frame().size.height;
+    screens
+        .iter()
+        .map(|screen| {
+            let frame = screen.visibleFrame();
+            WorkArea {
+                x: frame.origin.x,
+                y: primary_height - (frame.origin.y + frame.size.height),
+                width: frame.size.width,
+                height: frame.size.height,
+            }
+        })
+        .collect()
 }
 
 /// Return the frontmost application's process ID without activating it.
