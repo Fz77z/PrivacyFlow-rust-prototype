@@ -103,11 +103,14 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
-    /// The size the window was last resized and repositioned to, in minimal
-    /// mode. `None` until the first resize. Compared against this frame's
-    /// chosen size so that the window is only touched, and `work_areas` only
-    /// queried, on an actual transition between the three sizes rather than
-    /// on every frame.
+    /// The size the window is currently resized to. Seeded at construction
+    /// from the size the window actually starts at (which `main.rs` decides
+    /// from the same setting), then kept in step whenever the window is
+    /// resized. Compared against this frame's chosen size so the window is
+    /// only touched, and `work_areas` only queried, on an actual transition
+    /// between the three sizes, and this holds regardless of whether minimal
+    /// mode is currently on or off: it also covers being switched off while
+    /// the window is not yet full size.
     applied_size: Option<ui::capsule::CapsuleSize>,
 }
 
@@ -194,6 +197,16 @@ impl LocalFlowApp {
         start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
         let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
         let centre = crate::window_position::load(&data_dir, capsule_size);
+        // Matches what main.rs already decided the window starts at, from the
+        // same setting. Seeded rather than left `None` so "already the right
+        // size" is true from the very first frame: an unseeded `None` would
+        // read as a change on frame one and immediately resize a window that
+        // was already correct.
+        let applied_size = Some(if state.settings.minimal_mode {
+            ui::capsule::CapsuleSize::Bead
+        } else {
+            ui::capsule::CapsuleSize::Full
+        });
         Self {
             state,
             microphone,
@@ -206,7 +219,7 @@ impl LocalFlowApp {
             data_dir,
             centre,
             dragging: false,
-            applied_size: None,
+            applied_size,
         }
     }
 
@@ -407,37 +420,46 @@ impl eframe::App for LocalFlowApp {
         let size = ui::capsule::size_for(minimal, pointing, self.state.hud != HudState::Idle);
         let target = size.points();
         let (width, height) = (target.x, target.y);
-        // Minimal mode off must leave the window exactly alone: no resize,
-        // no reposition, nothing competing with the drag's own commands. That
-        // is what makes minimal mode off identical to today, and it is also
-        // why this whole block, not just the repaint request, is gated here.
         if minimal {
             // Polling the pointer means an idle LocalFlow in minimal mode
             // wakes ten times a second rather than sleeping until an event.
             // That is the price of the proximity fade, and it is paid only
-            // while minimal mode is on, which is not the default.
+            // while minimal mode is on, which is not the default. This is the
+            // one thing that is genuinely specific to minimal mode being on;
+            // the resize below is not, and must not be gated the same way.
             ctx.request_repaint_after(Duration::from_millis(100));
-            // The window is snapped straight to the chosen size rather than
-            // tweened towards it. A tween would leave the window and the
-            // capsule `show` paints disagreeing about the size for the
-            // duration of the animation, which is either clipped content on a
-            // grow or a capsule floating inside an oversized window on a
-            // shrink. Only touched, and `work_areas` only asked, on an actual
-            // transition between sizes, since a per-frame `NSScreen::screens`
-            // call for a size that has not changed buys nothing.
-            if self.applied_size != Some(size) {
-                if let Some(centre) = self.centre {
-                    let (x, y) = crate::window_position::place(
-                        centre,
-                        (width, height),
-                        &crate::platform::work_areas(),
-                    );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        width, height,
-                    )));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
-                    self.applied_size = Some(size);
-                }
+        }
+        // Resized only on an actual transition, never merely because minimal
+        // mode is on or off. Gating this on `minimal` instead of on the size
+        // actually changing was tried and was wrong: turning minimal mode off
+        // while the window was a bead left it a bead forever, because
+        // `size_for` was already back to reporting `Full` but nothing was
+        // left to apply it. `applied_size` is seeded at construction from the
+        // size the window actually starts at, so "already the right size" is
+        // true from the first frame in both the minimal and the full case,
+        // and this block runs at all only when the window is not already
+        // what `size` calls for, which includes both the drag-off-an-edge
+        // case (identical size, nothing sent) and the toggle-off-while-a-bead
+        // case (differing size, applied once).
+        //
+        // The window is snapped straight to the chosen size rather than
+        // tweened towards it. A tween would leave the window and the capsule
+        // `show` paints disagreeing about the size for the duration of the
+        // animation, which is either clipped content on a grow or a capsule
+        // floating inside an oversized window on a shrink. `work_areas` is
+        // only asked inside this same branch, since a per-frame
+        // `NSScreen::screens` call for a size that has not changed buys
+        // nothing.
+        if self.applied_size != Some(size) {
+            if let Some(centre) = self.centre {
+                let (x, y) = crate::window_position::place(
+                    centre,
+                    (width, height),
+                    &crate::platform::work_areas(),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                self.applied_size = Some(size);
             }
         }
 
