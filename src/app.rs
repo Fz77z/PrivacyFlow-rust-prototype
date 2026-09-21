@@ -2,7 +2,7 @@ use crate::audio::{CapturedAudio, Microphone};
 use crate::platform::{
     frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
 };
-use crate::router::KevWorker;
+use crate::router::{KevWorker, Reply};
 use crate::state::{AppState, Failure, HudState, Route, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
@@ -46,6 +46,10 @@ enum PipelineMessage {
     WorkerReady,
     WorkerFailed(String),
     Finished(Box<WorkResult>),
+    /// The capture held no speech. Deliberately not a `Finished` carrying an
+    /// empty result: there is no transcript, no route and no insertion to
+    /// report, and the capsule has nothing to do but say so and settle.
+    NoSpeech,
 }
 
 pub struct LocalFlowApp {
@@ -215,6 +219,7 @@ impl LocalFlowApp {
                     self.state.worker = WorkerStatus::Failed(why);
                 }
                 PipelineMessage::Finished(result) => self.apply_result(*result),
+                PipelineMessage::NoSpeech => self.state.record_no_speech(),
             }
         }
     }
@@ -392,8 +397,7 @@ fn start_pipeline_worker(
             }
             repaint.request_repaint();
             for item in work_rx {
-                let result = process(&mut worker, &audio_dir, item);
-                let _ = result_tx.send(PipelineMessage::Finished(Box::new(result)));
+                let _ = result_tx.send(process(&mut worker, &audio_dir, item));
                 repaint.request_repaint();
             }
         })
@@ -427,7 +431,11 @@ fn sweep_audio_cache(dir: &Path) {
     }
 }
 
-fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkItem) -> WorkResult {
+fn process(
+    worker: &mut Result<KevWorker, String>,
+    audio_dir: &Path,
+    item: WorkItem,
+) -> PipelineMessage {
     let speech_finished = item.speech_finished;
     let mut timings = Timings {
         queue_ms: Some(item.queued_at.elapsed().as_millis()),
@@ -465,7 +473,9 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         );
     }
     let inference = match inference {
-        Ok(value) => value,
+        Ok(Reply::Transcribed(inference)) => inference,
+        // Nothing was said, so there is nothing to route, insert or file.
+        Ok(Reply::NoSpeech) => return PipelineMessage::NoSpeech,
         Err(error) => {
             return failed(
                 timings,
@@ -516,13 +526,13 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
     };
     timings.insert_ms = Some(insert_started.elapsed().as_millis());
     timings.total_ms = Some(speech_finished.elapsed().as_millis());
-    WorkResult {
+    PipelineMessage::Finished(Box::new(WorkResult {
         transcript: inference.transcript,
         route: Some(inference.route),
         output: inference.output,
         timings,
         outcome: Outcome::Inserted(insertion),
-    }
+    }))
 }
 
 fn failed(
@@ -533,9 +543,9 @@ fn failed(
     output: String,
     headline: &'static str,
     error: String,
-) -> WorkResult {
+) -> PipelineMessage {
     timings.total_ms = Some(speech_finished.elapsed().as_millis());
-    WorkResult {
+    PipelineMessage::Finished(Box::new(WorkResult {
         transcript,
         route,
         output,
@@ -543,7 +553,7 @@ fn failed(
         // Every pipeline failure happens after the user has spoken, so the
         // kind is settled here: the words did not come back.
         outcome: Outcome::Failed(Failure::dropped(headline, error)),
-    }
+    }))
 }
 
 fn install_visuals(ctx: &egui::Context) {

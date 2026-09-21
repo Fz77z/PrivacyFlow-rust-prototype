@@ -72,6 +72,9 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
                 HudState::Processing => ("Transcribing", theme::LABEL),
                 HudState::Done => ("Inserted", theme::LABEL),
                 HudState::Copied => ("Copied", theme::LABEL),
+                // Muted, like Ready: nothing was said, so nothing happened,
+                // and the capsule should not announce it as though it had.
+                HudState::NoSpeech => ("No speech", theme::MUTED),
                 HudState::Error => ("Ready", theme::MUTED),
             };
             painter.text(

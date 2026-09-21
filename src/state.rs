@@ -16,6 +16,10 @@ pub enum HudState {
     /// This is a success with a caveat rather than a failure: the words are
     /// in the user's hands, they just need a paste.
     Copied,
+    /// The key was held and nothing was said. Neither a dictation nor a
+    /// failure: there was nothing to transcribe, so the capsule says so and
+    /// settles back without filing anything.
+    NoSpeech,
     Error,
 }
 
@@ -234,6 +238,18 @@ impl AppState {
         self.history.truncate(50);
     }
 
+    /// Files a press that held no speech.
+    ///
+    /// The omissions are the point. Nothing goes into the history, because a
+    /// dictation that captured no words has nothing to show in it, and the
+    /// unread dot is left exactly as it was, because the dot means "a failure
+    /// is waiting in the console" and this is not one. The capsule says so
+    /// for a moment and the dwell timer takes it back to Ready.
+    pub fn record_no_speech(&mut self) {
+        self.hud = HudState::NoSpeech;
+        self.done_at = Some(Instant::now());
+    }
+
     /// Opening the console is the acknowledgement, so it is the one place the
     /// unread dot is cleared.
     pub fn open_console(&mut self) {
@@ -381,6 +397,32 @@ mod tests {
         let mut state = AppState { console_open: true, ..Default::default() };
         state.record_failure(Failure::dropped("Transcription failed", "worker died"));
         assert!(!state.unread_failure);
+    }
+
+    /// Pressing the key and saying nothing is a non-event, not a dictation.
+    /// There is no transcript to keep and nothing for the user to go and read,
+    /// so filing it in Activity would pad the history with blank cards and
+    /// raising the dot would send them to the console to find them.
+    #[test]
+    fn a_silent_press_leaves_no_trace_in_the_console() {
+        let mut state = AppState::default();
+        state.record_no_speech();
+        assert_eq!(state.hud, HudState::NoSpeech);
+        assert!(state.done_at.is_some(), "the capsule has to settle back to Ready");
+        assert!(state.history.is_empty(), "there was no dictation to file");
+        assert!(!state.unread_failure, "nothing failed, so nothing is unread");
+    }
+
+    /// The dot outlives the capsule, so a failure the user has not opened the
+    /// console for must survive them pressing the key and saying nothing.
+    #[test]
+    fn a_silent_press_does_not_clear_an_earlier_unread_failure() {
+        let mut state = AppState {
+            unread_failure: true,
+            ..Default::default()
+        };
+        state.record_no_speech();
+        assert!(state.unread_failure);
     }
 
     /// The Status tab reports what is true, so the worker starts out unknown
