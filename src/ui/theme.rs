@@ -42,11 +42,6 @@ pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 /// if it proves annoying.
 pub const CATCHMENT_SIZE: Vec2 = Vec2::new(320.0, 120.0);
 
-/// How much room the capsule's outline needs outside the shape it draws
-/// around. The stroke is one point wide and centred half a point out, so it
-/// occupies one point; this is that with a point to spare.
-pub const EDGE_ROOM: f32 = 2.0;
-
 /// The window size for a given setting.
 ///
 /// Only minimal mode needs a catchment, because only minimal mode has to
@@ -57,11 +52,7 @@ pub fn window_size(minimal_mode: bool) -> Vec2 {
     if minimal_mode {
         CATCHMENT_SIZE
     } else {
-        // Not exactly the capsule. The outline is drawn outside the shape, so
-        // a window sized to the shape clips it away entirely and the capsule
-        // loses its border. The slack is invisible and small enough that the
-        // clicks it swallows are ones aimed at the capsule's own edge.
-        CAPSULE_SIZE + Vec2::splat(EDGE_ROOM * 2.0)
+        CAPSULE_SIZE
     }
 }
 

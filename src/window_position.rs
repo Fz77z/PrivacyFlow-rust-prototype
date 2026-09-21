@@ -236,8 +236,8 @@ mod tests {
     fn a_dragged_window_converts_with_its_own_size_not_some_other() {
         let catchment = centre_of_window((100.0, 100.0), (320.0, 120.0));
         assert_eq!((catchment.x, catchment.y), (260.0, 160.0));
-        let bare = centre_of_window((100.0, 100.0), (220.0, 60.0));
-        assert_eq!((bare.x, bare.y), (210.0, 130.0));
+        let bare = centre_of_window((100.0, 100.0), (216.0, 56.0));
+        assert_eq!((bare.x, bare.y), (208.0, 128.0));
         assert_ne!(
             (catchment.x, catchment.y),
             (bare.x, bare.y),

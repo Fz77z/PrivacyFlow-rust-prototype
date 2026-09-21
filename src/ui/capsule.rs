@@ -96,9 +96,21 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
 /// being animated towards, so a half grown capsule never paints a label into
 /// a shape too small to hold it.
 pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleResponse {
-    // The window is the catchment and never changes size while the capsule
-    // animates, so the capsule is centred inside it rather than filling it.
-    let rect = Rect::from_center_size(ui.max_rect().center(), painted);
+    // The capsule is centred in its window rather than filling it, and it
+    // never quite fills it: the outline is drawn outside the shape, so the
+    // shape has to leave the outline somewhere to go. With minimal mode on
+    // there is a whole catchment of room; with it off the window is exactly
+    // the capsule, and without this inset the outline would be clipped away
+    // and the default configuration would have no border at all.
+    //
+    // Insetting the painted shape rather than inflating the window is what
+    // keeps the window exactly the capsule when minimal mode is off. An
+    // inflated window would stop being the thing the drag conversion divides
+    // by, and would put a click-swallowing ring around the default capsule.
+    let room = ui.max_rect();
+    let limit = room.size() - Vec2::splat(EDGE_WIDTH * 2.0);
+    let painted = Vec2::new(painted.x.min(limit.x), painted.y.min(limit.y));
+    let rect = Rect::from_center_size(room.center(), painted);
     // Clipped a little wider than the capsule, because the outline sits
     // outside it and would otherwise be cut off at the very edge.
     let painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
