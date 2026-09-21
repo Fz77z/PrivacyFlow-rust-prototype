@@ -108,9 +108,10 @@ impl LocalFlowApp {
         install_visuals(&cc.egui_ctx);
         // The capsule floats over whatever the user is writing in, so clicking
         // it to drag it or to open the console must not take focus away from
-        // that. Done here because the window exists by the time this runs and
-        // the console, which is a normal window and should take focus, does
-        // not exist yet.
+        // that. Done here because the window exists by the time this runs.
+        // The console is left alone by name rather than by timing: the
+        // replacement identifies the capsule and defers for every other
+        // window, so it does not matter that the console is created later.
         let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =

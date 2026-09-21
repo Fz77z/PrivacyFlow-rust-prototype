@@ -100,12 +100,16 @@ fn answer(this: *mut AnyObject, cmd: Sel, original: &AtomicPtr<c_void>) -> Bool 
     }
     let original = original.load(Ordering::Acquire);
     if original.is_null() {
-        // Unreachable: the originals are stored before the replacements are
-        // installed, so nothing can dispatch here without them. Answering no
-        // rather than guessing yes keeps a wrong answer safe, since a window
-        // that declines focus is recoverable and one that steals it is the
-        // bug this module exists to prevent.
-        return Bool::NO;
+        // Unreachable by construction: both originals are stored before
+        // either replacement is installed, so nothing can dispatch here
+        // without them.
+        //
+        // Yes rather than no, because only a window that is NOT the capsule
+        // can reach this line. Answering no here would deny focus to the
+        // console, which is the window the user types in, and that is the
+        // less recoverable of the two wrong answers.
+        debug_assert!(false, "a replacement dispatched before its original was stored");
+        return Bool::YES;
     }
     // SAFETY: the pointer came from the method being replaced, which has
     // exactly this signature, and it is written once before any dispatch.
@@ -134,7 +138,7 @@ pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
     let pointer: *const AnyObject = &*window as &AnyObject;
     CAPSULE.store(pointer as *mut AnyObject, Ordering::Release);
 
-    if !INSTALLED.swap(true, Ordering::AcqRel) {
+    if !INSTALLED.load(Ordering::Acquire) {
         // `class` rather than `object_getClass`: if KVO has already inserted
         // its subclass, it hides itself from `class`, and replacing methods
         // on the subclass it owns would be replacing them on a class it may
@@ -145,6 +149,10 @@ pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
         if !installed {
             return false;
         }
+        // Set only once BOTH replacements are in. Claiming it up front would
+        // leave the process permanently half patched if the second failed,
+        // with no retry able to repair it.
+        INSTALLED.store(true, Ordering::Release);
     }
 
     !window.canBecomeKeyWindow()
@@ -152,6 +160,12 @@ pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
 
 /// Replace one method, remembering what was there so the replacement can
 /// defer to it for every window that is not the capsule.
+///
+/// What is remembered is winit's implementation rather than AppKit's, because
+/// winit overrides both of these to return true. That is also why the check
+/// at the end of `make_capsule_non_activating` is meaningful: a replacement
+/// that failed to install would leave winit's true in place, not the
+/// borderless window's false, so the check cannot pass by accident.
 ///
 /// The type encoding is copied from the method being replaced rather than
 /// written out by hand. A hand-written `BOOL` encoding is correct only on
