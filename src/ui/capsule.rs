@@ -1,4 +1,4 @@
-use crate::state::{AppState, HudState};
+use crate::state::{AppState, Failure, HudState};
 use crate::ui::mark::{self, Appearance};
 use crate::ui::theme;
 use egui::{Align2, Color32, Pos2, Rect, Rounding, Sense, Stroke, Ui, Vec2};
@@ -13,33 +13,139 @@ pub enum CapsuleAction {
     Moved(Pos2),
 }
 
-/// Draws the whole widget. The capsule is the window, so this paints every
-/// pixel the user sees: there is no title bar above it.
-pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
-    let rect = Rect::from_min_size(ui.max_rect().min, theme::CAPSULE_SIZE);
-    let painter = ui.painter_at(rect);
-    let failure = state.last_failure.as_ref().filter(|_| state.hud == HudState::Error);
-    let border = match (failure.is_some(), state.hud) {
+/// Which of the three shapes the capsule is wearing.
+///
+/// The names say what claims each one, not how big it is: the user is
+/// pointing at it, the user is dictating, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapsuleSize {
+    Bead,
+    Active,
+    Full,
+}
+
+impl CapsuleSize {
+    pub fn points(self) -> Vec2 {
+        match self {
+            CapsuleSize::Bead => theme::BEAD_SIZE,
+            CapsuleSize::Active => theme::ACTIVE_SIZE,
+            CapsuleSize::Full => theme::CAPSULE_SIZE,
+        }
+    }
+
+    pub fn radius(self) -> f32 {
+        match self {
+            CapsuleSize::Bead => theme::BEAD_RADIUS,
+            CapsuleSize::Active => theme::ACTIVE_RADIUS,
+            CapsuleSize::Full => theme::CAPSULE_RADIUS,
+        }
+    }
+}
+
+/// What the capsule is entitled to be right now.
+///
+/// Every input is something the user is doing, which is the governing rule
+/// expressed as a signature: the application never changes the capsule's
+/// shape on its own, and there is no argument here through which it could.
+///
+/// `active` is "a dictation has begun and its result has not yet retired",
+/// which the hud state already answers.
+pub fn size_for(minimal: bool, pointing: bool, active: bool) -> CapsuleSize {
+    if !minimal {
+        return CapsuleSize::Full;
+    }
+    if pointing {
+        return CapsuleSize::Full;
+    }
+    if active {
+        return CapsuleSize::Active;
+    }
+    CapsuleSize::Bead
+}
+
+/// What happened this frame, and whether the widget is being dragged.
+///
+/// `dragging` is reported separately from `action` because a drag in
+/// progress has no `Moved` action yet (that lands on release), but Task 5
+/// still needs to know about it: a fast drag can carry the pointer outside
+/// the window for a frame, and the capsule must not shrink out from under
+/// the user mid-drag just because `pointing` briefly reads false.
+pub struct CapsuleResponse {
+    pub action: Option<CapsuleAction>,
+    pub dragging: bool,
+}
+
+/// The one point border colour for the current state. Shared by the full
+/// capsule's shell and the bead, so the two never drift apart on what each
+/// state means.
+fn border_for(state: &AppState, has_failure: bool) -> Color32 {
+    match (has_failure, state.hud) {
         (true, _) => theme::ERROR_BORDER,
         (false, HudState::Listening) => theme::BORDER_LISTENING,
         (false, HudState::Processing) => theme::BORDER_TRANSCRIBING,
         (false, HudState::Done) => theme::BORDER_INSERTED,
         (false, HudState::Copied) => theme::BORDER_INSERTED,
         _ => theme::BORDER,
-    };
+    }
+}
+
+/// Draws the whole widget. The capsule is the window, so this paints every
+/// pixel the user sees: there is no title bar above it.
+pub fn show(
+    ui: &mut Ui,
+    state: &AppState,
+    time: f64,
+    size: CapsuleSize,
+    opacity: f32,
+) -> CapsuleResponse {
+    let rect = Rect::from_min_size(ui.max_rect().min, size.points());
+    let painter = ui.painter_at(rect);
+    let failure = state.last_failure.as_ref().filter(|_| state.hud == HudState::Error);
+    let border = border_for(state, failure.is_some());
+    // Everything is painted through this, so the proximity fade is one
+    // multiplication rather than an alpha threaded through every call.
+    let fade = |color: Color32| color.gamma_multiply(opacity);
     painter.rect(
         rect.shrink(0.5),
-        Rounding::same(theme::CAPSULE_RADIUS),
-        theme::FILL,
-        Stroke::new(1.0, border),
+        Rounding::same(size.radius()),
+        fade(theme::FILL),
+        Stroke::new(1.0, fade(border)),
     );
 
+    // The body is everything the icon does not claim, so dragging the widget
+    // works anywhere the user naturally grabs it.
+    let body = ui.interact(rect, ui.id().with("capsule"), Sense::click_and_drag());
+    let settled = drag_window(ui, &body);
+    let mut action = settled.map(CapsuleAction::Moved);
+
+    match size {
+        CapsuleSize::Bead => paint_bead(&painter, rect, state, border, opacity),
+        CapsuleSize::Active => paint_active(&painter, rect, state, failure, time),
+        CapsuleSize::Full => paint_full(ui, &painter, rect, state, failure, time, &mut action),
+    }
+
+    body.context_menu(|ui| menu(ui, &mut action));
+    CapsuleResponse { action, dragging: body.dragged() || body.drag_started() }
+}
+
+/// The full capsule: mark, label, and the console icon with its unread dot.
+/// This is today's whole widget, moved here unchanged so `show` can also
+/// paint the two smaller sizes.
+fn paint_full(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &AppState,
+    failure: Option<&Failure>,
+    time: f64,
+    action: &mut Option<CapsuleAction>,
+) {
     let mark_rect = Rect::from_min_size(
         Pos2::new(rect.left() + theme::PAD_LEFT, rect.center().y - theme::MARK_SIZE.y / 2.0),
         theme::MARK_SIZE,
     );
     mark::paint(
-        &painter,
+        painter,
         mark_rect,
         &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
         state.mic_level,
@@ -50,11 +156,6 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         Pos2::new(rect.right() - theme::PAD_RIGHT - theme::ICON_SIZE / 2.0, rect.center().y),
         Vec2::splat(theme::ICON_SIZE),
     );
-
-    // The body is everything the icon does not claim, so dragging the widget
-    // works anywhere the user naturally grabs it.
-    let body = ui.interact(rect, ui.id().with("capsule"), Sense::click_and_drag());
-    let settled = drag_window(ui, &body);
 
     let text_left = mark_rect.right() + theme::MARK_GAP;
     match failure {
@@ -107,7 +208,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
     } else {
         theme::ICON_TINT
     };
-    paint_console_glyph(&painter, icon_rect, tint);
+    paint_console_glyph(painter, icon_rect, tint);
     if state.unread_failure {
         // Survives the capsule returning to Ready, so a failure that happened
         // while the user was typing elsewhere is still there to be found.
@@ -116,16 +217,61 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
     }
 
-    let mut action = settled.map(CapsuleAction::Moved);
     if icon.clicked() {
-        action = Some(CapsuleAction::ToggleConsole);
+        *action = Some(CapsuleAction::ToggleConsole);
     }
     // The icon wins the overlap with the body, so without its own menu the
     // 36x36 square would be a dead zone for right-clicks. The spec asks for
     // the menu anywhere on the capsule.
-    body.context_menu(|ui| menu(ui, &mut action));
-    icon.context_menu(|ui| menu(ui, &mut action));
-    action
+    icon.context_menu(|ui| menu(ui, action));
+}
+
+/// The dictating capsule. Only the mark: at 84 by 28 there is no room for the
+/// label, and the mark is the part that has to stay legible while someone is
+/// actually speaking.
+///
+/// The dictating capsule is never faded, because it only exists while the
+/// user is dictating, so there is no opacity parameter to be dropped rather
+/// than kept as a lie.
+fn paint_active(
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &AppState,
+    failure: Option<&Failure>,
+    time: f64,
+) {
+    let mark_rect = Rect::from_center_size(rect.center(), Vec2::new(44.0, 16.0));
+    mark::paint(
+        painter,
+        mark_rect,
+        &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
+        state.mic_level,
+        time,
+    );
+}
+
+/// The bead. Too small for the mark or the label, so state is carried by
+/// colour alone. That is a knowing trade: the three failure kinds are
+/// indistinguishable at this size, and the detail is a point away.
+///
+/// An unread failure keeps the bead tinted after the dictating capsule has
+/// retired. Without that, a failure raised while the user was typing
+/// elsewhere would have nowhere to show: the bead has no console icon, and so
+/// nowhere to put the unread dot.
+fn paint_bead(
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &AppState,
+    border: Color32,
+    opacity: f32,
+) {
+    let colour = if state.unread_failure { theme::ERROR } else { border };
+    painter.rect(
+        rect.shrink(0.5),
+        Rounding::same(theme::BEAD_RADIUS),
+        theme::FILL.gamma_multiply(opacity),
+        Stroke::new(1.0, colour.gamma_multiply(opacity)),
+    );
 }
 
 /// Move the window with the pointer, rather than asking macOS to run a drag.
@@ -254,4 +400,37 @@ fn paint_console_glyph(painter: &egui::Painter, rect: Rect, tint: Color32) {
         ],
         stroke,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal mode off is today's behaviour, and today's behaviour is one
+    /// size. Nothing the user does may shrink a capsule they did not ask to
+    /// shrink.
+    #[test]
+    fn with_minimal_mode_off_the_capsule_is_always_full_size() {
+        for pointing in [false, true] {
+            for active in [false, true] {
+                assert_eq!(size_for(false, pointing, active), CapsuleSize::Full);
+            }
+        }
+    }
+
+    /// The three sizes, each claimed by one thing the user is doing.
+    #[test]
+    fn minimal_mode_rests_as_a_bead_and_grows_when_the_user_acts() {
+        assert_eq!(size_for(true, false, false), CapsuleSize::Bead);
+        assert_eq!(size_for(true, false, true), CapsuleSize::Active);
+        assert_eq!(size_for(true, true, false), CapsuleSize::Full);
+    }
+
+    /// Largest claim wins. Pointing at the capsule during a dictation must
+    /// show the full capsule, not the smaller dictating one, because the
+    /// reason to point at it is to read it.
+    #[test]
+    fn pointing_at_a_dictating_capsule_shows_the_whole_thing() {
+        assert_eq!(size_for(true, true, true), CapsuleSize::Full);
+    }
 }

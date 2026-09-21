@@ -332,7 +332,14 @@ impl eframe::App for LocalFlowApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                if let Some(action) = ui::capsule::show(ui, &self.state, ui.input(|i| i.time)) {
+                let response = ui::capsule::show(
+                    ui,
+                    &self.state,
+                    ui.input(|i| i.time),
+                    ui::capsule::CapsuleSize::Full,
+                    1.0,
+                );
+                if let Some(action) = response.action {
                     match action {
                         ui::capsule::CapsuleAction::ToggleConsole => {
                             if self.state.console_open {

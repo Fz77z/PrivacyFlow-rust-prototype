@@ -10,6 +10,14 @@ pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
+/// The bead: the capsule at rest in minimal mode. Too small for the mark or
+/// the label, so it carries state through colour alone.
+pub const BEAD_SIZE: Vec2 = Vec2::new(46.0, 14.0);
+pub const BEAD_RADIUS: f32 = 7.0;
+/// The dictating size. Big enough for the mark, which is the part that has to
+/// stay legible while the user is speaking.
+pub const ACTIVE_SIZE: Vec2 = Vec2::new(84.0, 28.0);
+pub const ACTIVE_RADIUS: f32 = 14.0;
 
 // The surfaces are a neutral near black. An earlier palette tinted them
 // blue, which quietly fought every other colour in the widget: the greens

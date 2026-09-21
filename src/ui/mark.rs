@@ -6,7 +6,11 @@ use egui::{Color32, Painter, Pos2, Rect, Rounding, Stroke, Vec2};
 /// fractions of the mark box, so every state paints the same silhouette and
 /// only colour and fill distinguish them.
 const BARS: [(f32, f32); 4] = [(0.00, 0.27), (0.26, 0.67), (0.52, 0.37), (0.78, 0.57)];
-const BAR_WIDTH: f32 = 4.0;
+/// Bar width as a fraction of the mark box. A fixed width would leave the
+/// bars looking clubbed when the mark is painted into the dictating capsule,
+/// which is less than half as wide. 4 points in the 36 point box this was
+/// designed against.
+const BAR_WIDTH_FRACTION: f32 = 4.0 / 36.0;
 
 /// How a bar is drawn. Filled bars read as live, hollow bars as unlit - the
 /// same language as a signal meter that has lost its signal.
@@ -25,19 +29,20 @@ pub struct Appearance {
 /// the shimmer; both only ever change bar heights inside `rect`, never the
 /// box itself.
 pub fn paint(painter: &Painter, rect: Rect, appearance: &Appearance, level: f32, time: f64) {
+    let bar_width = rect.width() * BAR_WIDTH_FRACTION;
     let bars = bars_for(appearance);
     for (index, (x, resting)) in BARS.iter().enumerate() {
         let height = rect.height() * animated_height(appearance, index, *resting, level, time);
         let left = rect.left() + rect.width() * x;
         let bar = Rect::from_center_size(
-            Pos2::new(left + BAR_WIDTH / 2.0, rect.center().y),
-            Vec2::new(BAR_WIDTH, height),
+            Pos2::new(left + bar_width / 2.0, rect.center().y),
+            Vec2::new(bar_width, height),
         );
         match bars[index] {
-            Bar::Filled(color) => painter.rect_filled(bar, Rounding::same(BAR_WIDTH / 2.0), color),
+            Bar::Filled(color) => painter.rect_filled(bar, Rounding::same(bar_width / 2.0), color),
             Bar::Hollow(color) => painter.rect_stroke(
                 bar,
-                Rounding::same(BAR_WIDTH / 2.0),
+                Rounding::same(bar_width / 2.0),
                 Stroke::new(1.4, color),
             ),
         };
@@ -51,7 +56,7 @@ pub fn paint(painter: &Painter, rect: Rect, appearance: &Appearance, level: f32,
                 Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0),
                 Pos2::new(rect.right() - 2.0, rect.top() + 2.0),
             ],
-            Stroke::new(2.4, theme::ERROR),
+            Stroke::new(2.4 * rect.width() / 36.0, theme::ERROR),
         );
     }
 }
