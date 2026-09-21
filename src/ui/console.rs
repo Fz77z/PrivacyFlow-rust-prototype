@@ -68,15 +68,27 @@ fn activity(ui: &mut Ui, state: &AppState) {
                     ui.add_space(6.0);
                     ui.small(format!(
                         "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
-                        crate::app::opt_ms(record.timings.audio_ms),
-                        crate::app::opt_ms(record.timings.capture_finalize_ms),
-                        crate::app::opt_ms(record.timings.queue_ms),
-                        crate::app::opt_ms(record.timings.asr_ms),
-                        crate::app::opt_ms(record.timings.router_ms),
-                        crate::app::opt_ms(record.timings.transform_ms),
-                        crate::app::opt_ms(record.timings.insert_ms),
-                        crate::app::opt_ms(record.timings.total_ms),
+                        opt_ms(record.timings.audio_ms),
+                        opt_ms(record.timings.capture_finalize_ms),
+                        opt_ms(record.timings.queue_ms),
+                        opt_ms(record.timings.asr_ms),
+                        opt_ms(record.timings.router_ms),
+                        opt_ms(record.timings.transform_ms),
+                        opt_ms(record.timings.insert_ms),
+                        opt_ms(record.timings.total_ms),
                     ));
+                    // The capsule says "Copied" for 1400 ms and then returns
+                    // to Ready. That state only happens because the user
+                    // switched away, so the one moment they are guaranteed not
+                    // to be watching the capsule was the only moment this was
+                    // said. The durable record has to carry it.
+                    if record.insertion == Some(crate::platform::Insertion::CopiedOnly) {
+                        ui.add_space(5.0);
+                        ui.colored_label(
+                            theme::MUTED,
+                            "Copied to the clipboard, not pasted: the destination app was no                              longer frontmost.",
+                        );
+                    }
                     // The console keeps the original message, whatever the
                     // capsule had room to say.
                     if let Some(failure) = &record.failure {
@@ -107,6 +119,28 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     } else {
         ("No device opened".to_owned(), theme::ERROR_TEXT)
     };
+    // Verified at startup by asking the capsule's own window, rather than
+    // assumed from the fact that the attempt was made. The whole behaviour is
+    // a thing that silently does not happen, so an unchecked claim about it
+    // would be worth nothing.
+    let focus = if state.capsule_non_activating {
+        ("Capsule does not take focus".to_owned(), theme::LABEL)
+    } else {
+        ("Capsule takes focus when clicked".to_owned(), theme::ERROR_TEXT)
+    };
+    // Asked live rather than cached at startup, because the user can grant
+    // this while the app is running and the answer is only useful if it is
+    // current. Without it a dictation transcribes correctly and then nothing
+    // reaches the cursor, which reads as a transcription fault rather than a
+    // permission one.
+    let accessibility = if crate::platform::can_synthesize_input() {
+        ("Allowed to send keystrokes".to_owned(), theme::LABEL)
+    } else {
+        (
+            "Not allowed - add LocalFlow to Accessibility, then relaunch".to_owned(),
+            theme::ERROR_TEXT,
+        )
+    };
     // Ask the router how it resolved the research root, and let it decide what
     // counts as present, rather than recomputing either here. Validating with a
     // local is_dir() used to let this row read healthy at the same moment the
@@ -121,6 +155,8 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     egui::Grid::new("status").num_columns(2).spacing([18.0, 10.0]).show(ui, |ui| {
         row(ui, "Hotkey", &hotkey.0, hotkey.1);
         row(ui, "Microphone", &microphone.0, microphone.1);
+        row(ui, "Accessibility", &accessibility.0, accessibility.1);
+        row(ui, "Window focus", &focus.0, focus.1);
         row(ui, "Inference worker", &worker.0, worker.1);
         row(ui, "ASR", "mlx-community/whisper-large-v3-turbo", theme::LABEL);
         row(ui, "Router", "scaling_run/checkpoints/pool_300", theme::LABEL);
@@ -134,6 +170,12 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
             .small()
             .color(theme::MUTED),
     );
+}
+
+/// A latency that was never measured, because the dictation did not reach
+/// that stage, reads as a dash rather than as a zero that claims it was free.
+fn opt_ms(value: Option<u128>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(|| "—".into())
 }
 
 fn row(ui: &mut Ui, label: &str, value: &str, color: Color32) {

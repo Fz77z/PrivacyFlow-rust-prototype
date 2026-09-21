@@ -35,7 +35,13 @@ cp "$ROOT/target/release/localflow" "$STAGE/Contents/MacOS/localflow"
 ICONSET="$ROOT/target/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
-python3 "$ROOT/bundle/make-icon.py" "$ROOT/target/AppIcon.png"
+# Rendering the icon takes about ten seconds and is deterministic, so it is
+# regenerated only when the generator is newer than its output. Delete
+# target/AppIcon.png to force it.
+if [[ ! -f "$ROOT/target/AppIcon.png" || "$ROOT/bundle/make-icon.py" -nt "$ROOT/target/AppIcon.png" ]]; then
+    echo "Rendering the app icon"
+    python3 "$ROOT/bundle/make-icon.py" "$ROOT/target/AppIcon.png"
+fi
 for size in 16 32 128 256 512; do
     sips -z $size $size "$ROOT/target/AppIcon.png" \
         --out "$ICONSET/icon_${size}x${size}.png" > /dev/null
@@ -44,9 +50,21 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$STAGE/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc signature. Whether this preserves permission grants across rebuilds
-# is an open question recorded in the spec; do not assume that it does.
-codesign --force --deep --sign - "$STAGE"
+# Signed with a stable self-signed identity rather than ad hoc. An ad-hoc
+# signature has no identity, so macOS falls back to identifying the app by a
+# hash of its binary, and every rebuild becomes a different application whose
+# Accessibility, Input Monitoring and Microphone grants have to be given
+# again. This is not about trust or distribution; it is about this machine
+# recognising successive builds as the same program.
+SIGNING_IDENTITY="LocalFlow Self Signed"
+if ! security find-identity -p codesigning | grep -q "$SIGNING_IDENTITY"; then
+    echo "No \"$SIGNING_IDENTITY\" code-signing identity found." >&2
+    echo "Run ./scripts/make-signing-cert.sh once to create it." >&2
+    echo "Signing ad hoc instead would silently cost you your permission" >&2
+    echo "grants on every rebuild, so this stops here rather than doing it." >&2
+    exit 1
+fi
+codesign --force --sign "$SIGNING_IDENTITY" "$STAGE"
 
 # Copy beside the install first, so a failed copy leaves the existing app in
 # place instead of removing it and putting nothing back. The remaining window

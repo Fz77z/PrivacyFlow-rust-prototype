@@ -1,19 +1,26 @@
-use std::time::{Duration, Instant};
+use crate::platform::Insertion;
+use std::time::Instant;
 
+/// What the capsule is showing, which is also the app's single answer to
+/// "where is this dictation up to?". Listening and Processing are the two
+/// states a dictation is in flight, so nothing else needs to track that
+/// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HudState {
     Idle,
     Listening,
     Processing,
     Done,
+    /// Transcribed and put on the pasteboard, but not pasted, because the
+    /// destination the user started dictating into was no longer frontmost.
+    /// This is a success with a caveat rather than a failure: the words are
+    /// in the user's hands, they just need a paste.
+    Copied,
+    /// The key was held and nothing was said. Neither a dictation nor a
+    /// failure: there was nothing to transcribe, so the capsule says so and
+    /// settles back without filing anything.
+    NoSpeech,
     Error,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordingState {
-    Idle,
-    Recording,
-    Processing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -98,6 +105,9 @@ pub struct DebugRecord {
     pub output: String,
     pub timings: Timings,
     pub failure: Option<Failure>,
+    /// How the text got where it was going, for the dictations that succeeded.
+    /// Absent on a failure, where nothing was inserted at all.
+    pub insertion: Option<Insertion>,
 }
 
 /// What the resident Python worker is actually doing. Loading mlx-whisper and
@@ -121,7 +131,6 @@ pub enum ConsoleTab {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub recording: RecordingState,
     pub hud: HudState,
     pub mic_level: f32,
     pub transcript: String,
@@ -139,6 +148,11 @@ pub struct AppState {
     pub hotkey_installed: bool,
     /// Whether a microphone device opened at startup.
     pub microphone_available: bool,
+    /// Whether the capsule's window actually refuses keyboard focus, checked
+    /// once at startup by asking the window after it was changed. The class of
+    /// a window does not change afterwards, so this does not need re-asking
+    /// the way a permission does.
+    pub capsule_non_activating: bool,
     /// When the capsule last settled on a finished or failed dictation. The
     /// capsule returns to Ready 1.4s later, so the timer belongs with the
     /// result it describes.
@@ -148,7 +162,6 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            recording: RecordingState::Idle,
             hud: HudState::Idle,
             mic_level: 0.0,
             transcript: String::new(),
@@ -163,6 +176,7 @@ impl Default for AppState {
             worker: WorkerStatus::Starting,
             hotkey_installed: false,
             microphone_available: false,
+            capsule_non_activating: false,
             done_at: None,
         }
     }
@@ -173,7 +187,6 @@ impl AppState {
     /// including the dwell timer, so a press that arrives while the last
     /// result is still on screen cannot be retired by that result's clock.
     pub fn reset_for_recording(&mut self) {
-        self.recording = RecordingState::Recording;
         self.hud = HudState::Listening;
         self.mic_level = 0.0;
         self.clear_result();
@@ -194,7 +207,6 @@ impl AppState {
     /// dot points at the console unless the console is already the thing the
     /// user is looking at.
     pub fn record_failure(&mut self, failure: Failure) {
-        self.recording = RecordingState::Idle;
         self.hud = HudState::Error;
         if !self.console_open {
             self.unread_failure = true;
@@ -206,11 +218,11 @@ impl AppState {
             self.clear_result();
         }
         self.last_failure = Some(failure.clone());
-        self.push_history(Some(failure));
+        self.push_history(Some(failure), None);
         self.done_at = Some(Instant::now());
     }
 
-    pub fn push_history(&mut self, failure: Option<Failure>) {
+    pub fn push_history(&mut self, failure: Option<Failure>, insertion: Option<Insertion>) {
         self.history.insert(
             0,
             DebugRecord {
@@ -220,9 +232,22 @@ impl AppState {
                 output: self.output.clone(),
                 timings: self.timings.clone(),
                 failure,
+                insertion,
             },
         );
         self.history.truncate(50);
+    }
+
+    /// Files a press that held no speech.
+    ///
+    /// The omissions are the point. Nothing goes into the history, because a
+    /// dictation that captured no words has nothing to show in it, and the
+    /// unread dot is left exactly as it was, because the dot means "a failure
+    /// is waiting in the console" and this is not one. The capsule says so
+    /// for a moment and the dwell timer takes it back to Ready.
+    pub fn record_no_speech(&mut self) {
+        self.hud = HudState::NoSpeech;
+        self.done_at = Some(Instant::now());
     }
 
     /// Opening the console is the acknowledgement, so it is the one place the
@@ -233,13 +258,10 @@ impl AppState {
     }
 }
 
-pub fn dur_ms(d: Duration) -> u128 {
-    d.as_millis()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn recording_reset_clears_the_previous_result() {
@@ -251,7 +273,6 @@ mod tests {
             ..Default::default()
         };
         state.reset_for_recording();
-        assert_eq!(state.recording, RecordingState::Recording);
         assert_eq!(state.hud, HudState::Listening);
         assert!(
             state.transcript.is_empty()
@@ -305,7 +326,7 @@ mod tests {
     #[test]
     fn history_records_the_full_detail_not_the_headline() {
         let mut state = AppState::default();
-        state.push_history(Some(Failure::dropped("Couldn't insert", "Target application changed")));
+        state.push_history(Some(Failure::dropped("Couldn't insert", "Target application changed")), None);
         let recorded = state.history[0].failure.as_ref().unwrap();
         assert_eq!(recorded.detail, "Target application changed");
         assert_eq!(recorded.kind, FailureKind::Dropped);
@@ -346,6 +367,20 @@ mod tests {
         assert_eq!(record.failure.as_ref().unwrap().detail, "detail");
     }
 
+    /// The capsule shows "Copied" for 1400 ms, and that state exists only
+    /// because the user switched away, so the moment it is shown is the moment
+    /// they are guaranteed not to be looking. If the record does not carry it,
+    /// a dictation that was never pasted is indistinguishable from one that
+    /// was, and the app has claimed a success it did not achieve.
+    #[test]
+    fn history_distinguishes_a_copied_dictation_from_a_pasted_one() {
+        let mut state = AppState { transcript: "some words".into(), ..Default::default() };
+        state.push_history(None, Some(Insertion::CopiedOnly));
+        state.push_history(None, Some(Insertion::Pasted));
+        assert_eq!(state.history[0].insertion, Some(Insertion::Pasted));
+        assert_eq!(state.history[1].insertion, Some(Insertion::CopiedOnly));
+    }
+
     /// A dropped dictation is the one kind where the user spoke, so whatever
     /// did come back belongs in the record next to the error.
     #[test]
@@ -362,6 +397,32 @@ mod tests {
         let mut state = AppState { console_open: true, ..Default::default() };
         state.record_failure(Failure::dropped("Transcription failed", "worker died"));
         assert!(!state.unread_failure);
+    }
+
+    /// Pressing the key and saying nothing is a non-event, not a dictation.
+    /// There is no transcript to keep and nothing for the user to go and read,
+    /// so filing it in Activity would pad the history with blank cards and
+    /// raising the dot would send them to the console to find them.
+    #[test]
+    fn a_silent_press_leaves_no_trace_in_the_console() {
+        let mut state = AppState::default();
+        state.record_no_speech();
+        assert_eq!(state.hud, HudState::NoSpeech);
+        assert!(state.done_at.is_some(), "the capsule has to settle back to Ready");
+        assert!(state.history.is_empty(), "there was no dictation to file");
+        assert!(!state.unread_failure, "nothing failed, so nothing is unread");
+    }
+
+    /// The dot outlives the capsule, so a failure the user has not opened the
+    /// console for must survive them pressing the key and saying nothing.
+    #[test]
+    fn a_silent_press_does_not_clear_an_earlier_unread_failure() {
+        let mut state = AppState {
+            unread_failure: true,
+            ..Default::default()
+        };
+        state.record_no_speech();
+        assert!(state.unread_failure);
     }
 
     /// The Status tab reports what is true, so the worker starts out unknown

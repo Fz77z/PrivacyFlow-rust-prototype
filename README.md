@@ -61,6 +61,50 @@ Installing to a fixed location matters more than it looks.
 macOS grants Accessibility, Input Monitoring and Microphone permission per executable, so a binary that moves is treated as a different application and has to be granted them again.
 Installing to a stable path is what gives the app a stable identity to grant those permissions to.
 
+The signature matters for the same reason.
+`scripts/build-app.sh` signs with a self-signed identity created once by `scripts/make-signing-cert.sh`, because an ad-hoc signature carries no identity at all and macOS then falls back to identifying the app by a hash of its binary.
+Every rebuild changes that hash, so every rebuild looked like a different application with none of the previous one's permissions.
+The certificate has nothing to do with trust or distribution; it exists so successive builds present the same identity to this machine.
+
+### Two permissions have to be added by hand
+
+LocalFlow prompts for the microphone and for nothing else.
+The other two must be added manually in System Settings, Privacy and Security, using the plus button to select `/Applications/LocalFlow.app`.
+
+| Permission | Needed for | Symptom when missing |
+| --- | --- | --- |
+| Input Monitoring | Seeing the hotkey while another application is focused | The hotkey only works while LocalFlow itself is focused |
+| Accessibility | Synthesizing the Cmd-V that inserts the text | Dictation transcribes but nothing appears at the cursor |
+| Microphone | Capturing audio. This one does prompt, on the first capture | Capture returns silence, reported as audio too short or quiet |
+
+Neither of the first two announces itself.
+The hotkey uses a listen-only event tap, and macOS does not reliably raise a prompt for those: it delivers a reduced event stream instead, so the app looks like it is working rather than like it is blocked.
+
+Quit and relaunch LocalFlow after granting either one.
+The event tap is created at startup and does not pick up a grant made while the app is running.
+
+#### If a permission is listed and enabled but does not work
+
+Remove the entry and add it again. Do not toggle it off first.
+
+macOS records a permission against the signature the application had when the grant was made.
+Rebuilding LocalFlow with a different signature, which is what happened when it moved from an ad-hoc signature to the self-signed one, leaves an entry that still displays as enabled while the current binary no longer matches what was recorded.
+
+Toggling the switch off and on again does not fix this.
+That only changes the stored decision on a record that already fails to match.
+Select the entry, remove it with the minus button while it is still enabled, then add `/Applications/LocalFlow.app` again with the plus button, which writes a fresh record against the signature the app has now.
+
+This presents as the app being unable to do the thing it has permission for.
+Insertion is the clearest case: the text reaches the clipboard, a manual paste works, the app reports a successful insert, and nothing arrives at the cursor.
+
+The same work launched from a terminal will appear to behave correctly, because a process started from a shell is attributed to that shell for permission purposes and borrows its grants.
+That makes running from the terminal a misleading way to test this particular class of problem.
+
+Now that the signing identity is stable this should not recur, since rebuilds present the same signature.
+
+Do not run `tccutil reset` against these expecting a fresh prompt.
+It removes the entry and nothing re-creates it, which leaves the app quietly unable to see the hotkey or to insert text.
+
 The app has no Dock icon by design.
 It is a floating widget, so it is quit from the capsule's right-click menu or from the console window.
 
@@ -76,6 +120,10 @@ The transcript is left on the pasteboard afterwards.
 Restoring the previous clipboard on a timer raced the target application's asynchronous paste handling, which could insert the older clipboard contents instead of the dictated text.
 
 LocalFlow records which application was frontmost when dictation started and refuses to insert if a different application is frontmost when the text is ready.
+The transcript is on the pasteboard in that case, so the words are not lost; they need a paste.
+
+The pasteboard is written before anything that can refuse, including the Accessibility check.
+A dictation LocalFlow cannot place for you is exactly the one where you most need the text, so every path from that point leaves it on the clipboard.
 
 ## Interface
 
@@ -105,6 +153,3 @@ LocalFlow never quietly inserts the raw transcript when processing was supposed 
 
 Every successfully transcribed utterance is still written through the existing shadow collector before insertion. A burned batch is rejected before it can be appended; LocalFlow reports the collection problem without silently creating or contaminating an evaluation batch.
 
-## Testing
-
-See [TESTING.md](TESTING.md) for the intentionally small FAST, CONFIDENCE, and DEEP validation paths.

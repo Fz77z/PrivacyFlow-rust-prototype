@@ -1,7 +1,9 @@
 use crate::audio::{CapturedAudio, Microphone};
-use crate::platform::{frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent};
-use crate::router::{KevWorker, RouteResult};
-use crate::state::{dur_ms, AppState, Failure, HudState, RecordingState, Timings, WorkerStatus};
+use crate::platform::{
+    frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
+};
+use crate::router::{KevWorker, Reply};
+use crate::state::{AppState, Failure, HudState, Route, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -17,16 +19,25 @@ struct WorkItem {
     queued_at: Instant,
     target_pid: Option<i32>,
 }
-struct WorkResult {
-    transcript: String,
-    route_result: Option<RouteResult>,
-    output: String,
-    timings: Timings,
+/// What became of one utterance. It either reached the cursor, in one of the
+/// two ways a dictation can land, or it was lost at a named stage. It is never
+/// both, so the two answers share one field rather than sitting side by side
+/// with one of them always meaningless.
+enum Outcome {
+    Inserted(Insertion),
     /// Which stage failed, categorised where it happened. The pipeline is the
     /// only thing that knows whether the words were lost to the transcriber or
     /// to the paste, so the whole failure travels back rather than being
     /// reconstructed by the UI.
-    failure: Option<Failure>,
+    Failed(Failure),
+}
+
+struct WorkResult {
+    transcript: String,
+    route: Option<Route>,
+    output: String,
+    timings: Timings,
+    outcome: Outcome,
 }
 
 /// The pipeline thread's only way of speaking to the UI. Readiness travels
@@ -35,6 +46,10 @@ enum PipelineMessage {
     WorkerReady,
     WorkerFailed(String),
     Finished(Box<WorkResult>),
+    /// The capture held no speech. Deliberately not a `Finished` carrying an
+    /// empty result: there is no transcript, no route and no insertion to
+    /// report, and the capsule has nothing to do but say so and settle.
+    NoSpeech,
 }
 
 pub struct LocalFlowApp {
@@ -52,6 +67,12 @@ pub struct LocalFlowApp {
 impl LocalFlowApp {
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
         install_visuals(&cc.egui_ctx);
+        // The capsule floats over whatever the user is writing in, so clicking
+        // it to drag it or to open the console must not take focus away from
+        // that. Done here because the window exists by the time this runs and
+        // the console, which is a normal window and should take focus, does
+        // not exist yet.
+        let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
             match GlobalHotkey::right_option(move || repaint.request_repaint()) {
@@ -84,9 +105,21 @@ impl LocalFlowApp {
         let mut state = AppState {
             hotkey_installed: hotkey_error.is_none(),
             microphone_available: microphone.is_some(),
+            capsule_non_activating,
             ..Default::default()
         };
-        if let Some(failure) = hotkey_error.or(microphone_error) {
+        // Losing this is a functional problem, not a cosmetic one: a capsule
+        // that takes focus when clicked leaves the next dictation with nowhere
+        // to go, which surfaces later as "No text field focused" and looks
+        // like the user's mistake. It is reported last because the other two
+        // stop dictation outright.
+        let focus_error = (!capsule_non_activating).then(|| {
+            Failure::blocked(
+                "Capsule takes focus",
+                "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
+            )
+        });
+        if let Some(failure) = hotkey_error.or(microphone_error).or(focus_error) {
             // The dot points at the console, so the console has to have
             // something to show when the user follows it. Clearing the dwell
             // timer keeps a startup failure on the capsule indefinitely: there
@@ -113,7 +146,9 @@ impl LocalFlowApp {
     }
 
     fn start_recording(&mut self) {
-        if self.state.recording != RecordingState::Idle {
+        // A dictation already in flight owns the microphone and the capsule,
+        // so a second press is ignored rather than allowed to restart either.
+        if matches!(self.state.hud, HudState::Listening | HudState::Processing) {
             return;
         }
         let target_pid = frontmost_application_pid();
@@ -149,7 +184,6 @@ impl LocalFlowApp {
         let Some(microphone) = &self.microphone else {
             return;
         };
-        self.state.recording = RecordingState::Processing;
         self.state.hud = HudState::Processing;
         let speech_finished = Instant::now();
         // Only the microphone stream is stopped here. Draining the capture
@@ -185,6 +219,7 @@ impl LocalFlowApp {
                     self.state.worker = WorkerStatus::Failed(why);
                 }
                 PipelineMessage::Finished(result) => self.apply_result(*result),
+                PipelineMessage::NoSpeech => self.state.record_no_speech(),
             }
         }
     }
@@ -194,16 +229,23 @@ impl LocalFlowApp {
     /// or reports which stage lost it.
     fn apply_result(&mut self, result: WorkResult) {
         self.state.transcript = result.transcript;
-        self.state.route = result.route_result.as_ref().map(|r| r.route);
+        self.state.route = result.route;
         self.state.output = result.output;
         self.state.timings = result.timings;
-        if let Some(failure) = result.failure {
-            self.fail(failure);
-        } else {
-            self.state.recording = RecordingState::Idle;
-            self.state.hud = HudState::Done;
-            self.state.push_history(None);
-            self.state.done_at = Some(Instant::now());
+        match result.outcome {
+            Outcome::Failed(failure) => self.fail(failure),
+            // A dictation whose destination went away is still a success from
+            // the user's side: the words exist and are on the pasteboard. It
+            // is reported as its own state rather than as either a clean
+            // insert or a failure, because it is neither.
+            Outcome::Inserted(insertion) => {
+                self.state.hud = match insertion {
+                    Insertion::Pasted => HudState::Done,
+                    Insertion::CopiedOnly => HudState::Copied,
+                };
+                self.state.push_history(None, Some(insertion));
+                self.state.done_at = Some(Instant::now());
+            }
         }
     }
 
@@ -287,6 +329,15 @@ impl eframe::App for LocalFlowApp {
                             self.state.open_console();
                             raise_console = true;
                         }
+                        ui::capsule::CapsuleAction::Moved(position) => {
+                            crate::window_position::save(
+                                &self.data_dir,
+                                crate::window_position::WindowPosition {
+                                    x: position.x,
+                                    y: position.y,
+                                },
+                            );
+                        }
                         ui::capsule::CapsuleAction::Quit => {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close)
                         }
@@ -346,8 +397,7 @@ fn start_pipeline_worker(
             }
             repaint.request_repaint();
             for item in work_rx {
-                let result = process(&mut worker, &audio_dir, item);
-                let _ = result_tx.send(PipelineMessage::Finished(Box::new(result)));
+                let _ = result_tx.send(process(&mut worker, &audio_dir, item));
                 repaint.request_repaint();
             }
         })
@@ -381,10 +431,14 @@ fn sweep_audio_cache(dir: &Path) {
     }
 }
 
-fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkItem) -> WorkResult {
+fn process(
+    worker: &mut Result<KevWorker, String>,
+    audio_dir: &Path,
+    item: WorkItem,
+) -> PipelineMessage {
     let speech_finished = item.speech_finished;
     let mut timings = Timings {
-        queue_ms: Some(dur_ms(item.queued_at.elapsed())),
+        queue_ms: Some(item.queued_at.elapsed().as_millis()),
         ..Default::default()
     };
     let target_pid = item.target_pid;
@@ -403,8 +457,8 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
             )
         }
     };
-    timings.capture_finalize_ms = Some(dur_ms(finalize_started.elapsed()));
-    timings.audio_ms = Some(dur_ms(audio.duration));
+    timings.capture_finalize_ms = Some(finalize_started.elapsed().as_millis());
+    timings.audio_ms = Some(audio.duration.as_millis());
 
     let inference = match worker {
         Ok(worker) => worker.transcribe_and_route(&audio.path, audio.duration),
@@ -419,7 +473,9 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         );
     }
     let inference = match inference {
-        Ok(value) => value,
+        Ok(Reply::Transcribed(inference)) => inference,
+        // Nothing was said, so there is nothing to route, insert or file.
+        Ok(Reply::NoSpeech) => return PipelineMessage::NoSpeech,
         Err(error) => {
             return failed(
                 timings,
@@ -433,7 +489,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         }
     };
     timings.asr_ms = Some(inference.asr_ms);
-    timings.router_ms = Some(inference.route.elapsed_ms);
+    timings.router_ms = Some(inference.router_ms);
 
     // The worker decides what each route produces, including refusing an
     // unimplemented one, so there is a single place that maps route to text.
@@ -454,51 +510,52 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         }
     };
     let insert_started = Instant::now();
-    if let Err(error) = insert_text(&inference.output, target_pid) {
-        return failed(
-            timings,
-            speech_finished,
-            inference.transcript,
-            Some(inference.route),
-            String::new(),
-            "Couldn't insert",
-            error.to_string(),
-        );
-    }
-    timings.insert_ms = Some(dur_ms(insert_started.elapsed()));
-    timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
-    WorkResult {
+    let insertion = match insert_text(&inference.output, target_pid) {
+        Ok(insertion) => insertion,
+        Err(error) => {
+            return failed(
+                timings,
+                speech_finished,
+                inference.transcript,
+                Some(inference.route),
+                String::new(),
+                "Couldn't insert",
+                error.to_string(),
+            )
+        }
+    };
+    timings.insert_ms = Some(insert_started.elapsed().as_millis());
+    timings.total_ms = Some(speech_finished.elapsed().as_millis());
+    PipelineMessage::Finished(Box::new(WorkResult {
         transcript: inference.transcript,
-        route_result: Some(inference.route),
+        route: Some(inference.route),
         output: inference.output,
         timings,
-        failure: None,
-    }
+        outcome: Outcome::Inserted(insertion),
+    }))
 }
 
 fn failed(
     mut timings: Timings,
     speech_finished: Instant,
     transcript: String,
-    route_result: Option<RouteResult>,
+    route: Option<Route>,
     output: String,
     headline: &'static str,
     error: String,
-) -> WorkResult {
-    timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
-    WorkResult {
+) -> PipelineMessage {
+    timings.total_ms = Some(speech_finished.elapsed().as_millis());
+    PipelineMessage::Finished(Box::new(WorkResult {
         transcript,
-        route_result,
+        route,
         output,
         timings,
         // Every pipeline failure happens after the user has spoken, so the
         // kind is settled here: the words did not come back.
-        failure: Some(Failure::dropped(headline, error)),
-    }
+        outcome: Outcome::Failed(Failure::dropped(headline, error)),
+    }))
 }
-pub fn opt_ms(value: Option<u128>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "—".into())
-}
+
 fn install_visuals(ctx: &egui::Context) {
     crate::ui::theme::install(ctx);
     let mut visuals = egui::Visuals::dark();

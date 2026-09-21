@@ -28,21 +28,29 @@ fn inference_timeout(audio: Duration) -> Duration {
 }
 
 #[derive(Debug, Clone)]
-pub struct RouteResult {
-    pub route: Route,
-    pub elapsed_ms: u128,
-}
-
-#[derive(Debug, Clone)]
 pub struct InferenceResult {
     pub transcript: String,
     pub asr_ms: u128,
-    pub route: RouteResult,
+    pub route: Route,
+    pub router_ms: u128,
     /// The text the route produced, which is the raw transcript for
     /// `PASS_THROUGH` and the processor's rewrite for a processed route.
     pub output: String,
     /// Set only when a route actually ran a text processor.
     pub processing_ms: Option<u128>,
+}
+
+/// What one reply from the worker means.
+///
+/// Silence is neither a transcript nor a failure. The worker measures every
+/// capture before transcribing it, because Whisper does not return nothing for
+/// silence, it invents a plausible sentence. A capture below that floor has
+/// nothing to route and nothing to insert, which is a different answer from
+/// the transcriber breaking and must not be reported as one.
+#[derive(Debug)]
+pub enum Reply {
+    Transcribed(InferenceResult),
+    NoSpeech,
 }
 
 /// The resident bridge to the exact research setup: mlx-whisper large-v3-turbo
@@ -129,7 +137,7 @@ impl KevWorker {
         &mut self,
         audio_path: &Path,
         audio_duration: Duration,
-    ) -> Result<InferenceResult> {
+    ) -> Result<Reply> {
         #[derive(Serialize)]
         struct Request<'a> {
             audio_path: &'a str,
@@ -197,17 +205,23 @@ struct Response {
     processor: Option<String>,
     processing_ms: Option<f64>,
     error: Option<String>,
+    no_speech: Option<bool>,
 }
 
 /// Turn one worker reply into the result the pipeline inserts.
 ///
 /// This is the whole contract between the Python worker and the application,
 /// so it is kept separate from the transport in order to stay testable.
-fn parse_response(line: &str) -> Result<InferenceResult> {
+fn parse_response(line: &str) -> Result<Reply> {
     let response: Response =
         serde_json::from_str(line).context("Inference worker sent invalid JSON")?;
     if let Some(error) = response.error {
         return Err(anyhow!(error));
+    }
+    // Checked after the error and before everything else: a reply that says
+    // nothing was said carries none of the fields a transcript must have.
+    if response.no_speech == Some(true) {
+        return Ok(Reply::NoSpeech);
     }
 
     // A processor name is what distinguishes a rewritten route from a
@@ -223,7 +237,7 @@ fn parse_response(line: &str) -> Result<InferenceResult> {
                 .round() as u128,
         )
     };
-    Ok(InferenceResult {
+    Ok(Reply::Transcribed(InferenceResult {
         transcript: response
             .transcript
             .ok_or_else(|| anyhow!("Inference worker omitted transcript"))?,
@@ -235,16 +249,14 @@ fn parse_response(line: &str) -> Result<InferenceResult> {
             .asr_ms
             .ok_or_else(|| anyhow!("Inference worker omitted ASR latency"))?
             .round() as u128,
-        route: RouteResult {
-            route: response
-                .route
-                .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
-            elapsed_ms: response
-                .router_ms
-                .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
-                .round() as u128,
-        },
-    })
+        route: response
+            .route
+            .ok_or_else(|| anyhow!("Inference worker omitted route"))?,
+        router_ms: response
+            .router_ms
+            .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
+            .round() as u128,
+    }))
 }
 
 impl Drop for KevWorker {
@@ -349,8 +361,10 @@ mod tests {
 
     #[test]
     fn a_pass_through_reply_inserts_the_raw_transcript_and_reports_no_processing() {
-        let result = parse_response(PASS_THROUGH_REPLY).unwrap();
-        assert_eq!(result.route.route, Route::PassThrough);
+        let Reply::Transcribed(result) = parse_response(PASS_THROUGH_REPLY).unwrap() else {
+            panic!("a reply carrying a transcript is not silence");
+        };
+        assert_eq!(result.route, Route::PassThrough);
         assert_eq!(result.output, "This was written using the dictation.");
         assert_eq!(result.output, result.transcript);
         assert_eq!(result.processing_ms, None);
@@ -358,11 +372,36 @@ mod tests {
 
     #[test]
     fn a_processed_reply_inserts_the_rewrite_rather_than_the_transcript() {
-        let result = parse_response(TRANSFORM_REPLY).unwrap();
-        assert_eq!(result.route.route, Route::Transform);
+        let Reply::Transcribed(result) = parse_response(TRANSFORM_REPLY).unwrap() else {
+            panic!("a reply carrying a transcript is not silence");
+        };
+        assert_eq!(result.route, Route::Transform);
         assert_eq!(result.transcript, "Yo yo yo it's your boy");
         assert_eq!(result.output, "Yo yo yo, it's your boy.");
         assert_eq!(result.processing_ms, Some(394));
+    }
+
+    /// Pressing the key and saying nothing is not a failed dictation. The
+    /// worker measures the capture and answers this instead of an error, and
+    /// the two must never collapse into each other: silence reported as a
+    /// failure tells the user their words were lost, and a failure reported
+    /// as silence hides a broken transcriber.
+    #[test]
+    fn a_silent_capture_is_reported_as_no_speech_rather_than_as_a_failure() {
+        assert!(matches!(
+            parse_response(r#"{"no_speech": true}"#).unwrap(),
+            Reply::NoSpeech
+        ));
+    }
+
+    /// A reply that carries an error is a failure whatever else it says, so
+    /// the error is read first.
+    #[test]
+    fn an_error_is_still_a_failure_even_beside_a_no_speech_flag() {
+        let error = parse_response(r#"{"no_speech": true, "error": "worker died"}"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "worker died");
     }
 
     #[test]
