@@ -33,21 +33,6 @@ impl CapsuleSize {
         }
     }
 
-    /// The largest arrangement that fits in a shape this wide.
-    ///
-    /// The capsule is animated between sizes, so most frames are drawn at a
-    /// width that is not one of the three. Choosing the layout from the width
-    /// actually being drawn is what stops a half grown capsule painting a
-    /// label into a shape too small to hold it.
-    pub fn for_width(width: f32) -> Self {
-        if width >= CapsuleSize::Full.points().x {
-            CapsuleSize::Full
-        } else if width >= CapsuleSize::Active.points().x {
-            CapsuleSize::Active
-        } else {
-            CapsuleSize::Bead
-        }
-    }
 
 }
 
@@ -114,43 +99,32 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
 /// to draw, chosen from the size actually being drawn rather than the one
 /// being animated towards, so a half grown capsule never paints a label into
 /// a shape too small to hold it.
-pub fn show(
-    ui: &mut Ui,
-    state: &AppState,
-    time: f64,
-    painted: Vec2,
-    layout: CapsuleSize,
-    opacity: f32,
-) -> CapsuleResponse {
-    // The window is the catchment and never changes size, so the capsule is
-    // centred inside it rather than filling it.
+pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleResponse {
+    // The window is the catchment and never changes size while the capsule
+    // animates, so the capsule is centred inside it rather than filling it.
     let rect = Rect::from_center_size(ui.max_rect().center(), painted);
     let painter = ui.painter_at(rect);
     let failure = failure_for(state);
-    // An unread failure keeps the bead tinted after the dictating capsule has
-    // retired. Without that, a failure raised while the user was typing
-    // elsewhere would have nowhere to show: the bead has no console icon, and
-    // so nowhere to put the unread dot. Chosen here, before the one shell
-    // paint, rather than in a second paint over the shell: two FILL paints at
-    // less than full opacity would composite to a visibly more opaque bead
-    // than the fade asks for, and the bead's tint would blend with the
-    // ordinary border underneath it instead of replacing it.
-    let border = if layout == CapsuleSize::Bead && state.unread_failure {
+    // An unread failure tints the bead, which is the only way a failure
+    // raised while the user was typing elsewhere can still be seen once the
+    // capsule has shrunk: there is no console icon at that size, and so
+    // nowhere to put the unread dot. Chosen here, before the one shell paint,
+    // rather than painted over it: two fills would composite to something
+    // neither colour asked for.
+    let small = painted.x < theme::ACTIVE_SIZE.x;
+    let border = if small && state.unread_failure {
         theme::ERROR
     } else {
         border_for(state, failure.is_some())
     };
-    // Everything is painted through this, so the proximity fade is one
-    // multiplication rather than an alpha threaded through every call.
-    let fade = |color: Color32| color.gamma_multiply(opacity);
     // All three sizes are pills, so the radius is half the height at every
-    // point of the animation. Interpolating between the three fixed radii
-    // would be a second thing that has to agree with the first.
+    // point of the animation. Interpolating between three stored radii would
+    // be a second thing that has to agree with the first.
     painter.rect(
         rect.shrink(0.5),
         Rounding::same(rect.height() / 2.0),
-        fade(theme::FILL),
-        Stroke::new(1.0, fade(border)),
+        theme::FILL,
+        Stroke::new(1.0, border),
     );
 
     // The body is everything the icon does not claim, so dragging the widget
@@ -159,50 +133,99 @@ pub fn show(
     let settled = drag_window(ui, &body);
     let mut action = settled.map(CapsuleAction::Moved);
 
-    match layout {
-        CapsuleSize::Bead => paint_mark(&painter, rect, state, time, opacity, theme::BEAD_MARK_SIZE),
-        CapsuleSize::Active => {
-            paint_mark(&painter, rect, state, time, opacity, theme::ACTIVE_MARK_SIZE)
-        }
-        CapsuleSize::Full => paint_full(ui, &painter, rect, state, time, opacity, &mut action),
+    // How far the capsule has grown towards its full width. The mark slides
+    // and scales across this, and the label and icon fade in over it, so the
+    // contents flow with the shape instead of switching arrangement the
+    // instant it is wide enough. That switch is what made the bars appear to
+    // snap to the left as the capsule opened.
+    let to_full = progress(painted.x, theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
+    let mark_rect = mark_rect_for(rect);
+    mark::paint(
+        &painter,
+        mark_rect,
+        &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
+        state.mic_level,
+        time,
+    );
+    if to_full > 0.0 {
+        paint_label_and_icon(ui, &painter, rect, mark_rect, state, to_full, &mut action);
     }
 
     body.context_menu(|ui| menu(ui, &mut action));
     CapsuleResponse { action, dragging: body.dragged() || body.drag_started() }
 }
 
-/// The full capsule: mark, label, and the console icon with its unread dot.
-/// This is today's whole widget, moved here unchanged so `show` can also
-/// paint the two smaller sizes.
-fn paint_full(
+
+/// The dictating capsule. Only the mark: at 84 by 28 there is no room for the
+/// label, and the mark is the part that has to stay legible while someone is
+/// actually speaking.
+///
+/// The mark box is 22 by 18, not a uniform scale of the 36 by 30 box the mark
+/// was designed against: a uniform scale that fits the 28pt capsule height
+/// would also widen the bars past what the height leaves room for. Bar width
+/// against the tallest bar's height is about 5:1 at 36x30 and about 4.9:1 at
+/// 22x18, which keeps the silhouette; 22 is close to the largest width a
+/// uniform scale of the 28pt capsule height allows, leaving 5pt above and
+/// below, and the last bar's right edge lands at 19.60 inside 22.0, so
+/// nothing clips.
+/// How far `value` has travelled from `from` to `to`, clamped to 0 and 1.
+fn progress(value: f32, from: f32, to: f32) -> f32 {
+    ((value - from) / (to - from)).clamp(0.0, 1.0)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// Where the mark goes, for a capsule painted at any size between the three.
+///
+/// Two things move at once. The mark grows through the three mark sizes, and
+/// it slides from the middle of the capsule to the left as the label makes
+/// room for itself. Both are continuous, because the capsule is animated and
+/// anything that changes in one step during that animation reads as a snap,
+/// which is exactly what the earlier arrangement-swapping version did.
+///
+/// Split out from the painting so the geometry can be tested at every width
+/// the animation passes through, rather than only at the three it rests at.
+fn mark_rect_for(rect: Rect) -> Rect {
+    let to_active = progress(rect.width(), theme::BEAD_SIZE.x, theme::ACTIVE_SIZE.x);
+    let to_full = progress(rect.width(), theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
+    let size = if to_full > 0.0 {
+        Vec2::new(
+            lerp(theme::ACTIVE_MARK_SIZE.x, theme::MARK_SIZE.x, to_full),
+            lerp(theme::ACTIVE_MARK_SIZE.y, theme::MARK_SIZE.y, to_full),
+        )
+    } else {
+        Vec2::new(
+            lerp(theme::BEAD_MARK_SIZE.x, theme::ACTIVE_MARK_SIZE.x, to_active),
+            lerp(theme::BEAD_MARK_SIZE.y, theme::ACTIVE_MARK_SIZE.y, to_active),
+        )
+    };
+    let centre_x = lerp(
+        rect.center().x,
+        rect.left() + theme::PAD_LEFT + size.x / 2.0,
+        to_full,
+    );
+    Rect::from_center_size(Pos2::new(centre_x, rect.center().y), size)
+}
+
+/// The label and the console icon, faded in as the capsule reaches full
+/// width.
+///
+/// `appearing` runs from 0 to 1 across the last part of the growth. The icon
+/// only becomes clickable once it has fully arrived: a half faded icon that
+/// can be clicked is a target the user cannot see well enough to aim at.
+fn paint_label_and_icon(
     ui: &mut Ui,
     painter: &egui::Painter,
     rect: Rect,
+    mark_rect: Rect,
     state: &AppState,
-    time: f64,
-    opacity: f32,
+    appearing: f32,
     action: &mut Option<CapsuleAction>,
 ) {
     let failure = failure_for(state);
-    let fade = |color: Color32| color.gamma_multiply(opacity);
-    let mark_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + theme::PAD_LEFT, rect.center().y - theme::MARK_SIZE.y / 2.0),
-        theme::MARK_SIZE,
-    );
-    mark::paint(
-        painter,
-        mark_rect,
-        &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
-        state.mic_level,
-        time,
-        opacity,
-    );
-
-    let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - theme::PAD_RIGHT - theme::ICON_SIZE / 2.0, rect.center().y),
-        Vec2::splat(theme::ICON_SIZE),
-    );
-
+    let fade = |color: Color32| color.gamma_multiply(appearing);
     let text_left = mark_rect.right() + theme::MARK_GAP;
     match failure {
         Some(failure) => painter.text(
@@ -234,6 +257,20 @@ fn paint_full(
         }
     };
 
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - theme::PAD_RIGHT - theme::ICON_SIZE / 2.0, rect.center().y),
+        Vec2::splat(theme::ICON_SIZE),
+    );
+    let tint = if failure.is_some() || state.unread_failure {
+        theme::ICON_ALERT
+    } else {
+        theme::ICON_TINT
+    };
+    if appearing < 1.0 {
+        paint_console_glyph(painter, icon_rect, fade(tint));
+        return;
+    }
+
     let icon = ui.interact(icon_rect, ui.id().with("console"), Sense::click());
     // Hover text comes from the last failure rather than from the capsule's
     // current state: the red dot outlives the capsule's return to Ready, and
@@ -243,24 +280,15 @@ fn paint_full(
         None => icon.on_hover_text("Open console"),
     };
     if icon.hovered() {
-        painter.rect_filled(
-            icon_rect,
-            Rounding::same(theme::ICON_RADIUS),
-            fade(theme::ICON_HOVER),
-        );
+        painter.rect_filled(icon_rect, Rounding::same(theme::ICON_RADIUS), theme::ICON_HOVER);
     }
-    let tint = if failure.is_some() || state.unread_failure {
-        theme::ICON_ALERT
-    } else {
-        theme::ICON_TINT
-    };
-    paint_console_glyph(painter, icon_rect, fade(tint));
+    paint_console_glyph(painter, icon_rect, tint);
     if state.unread_failure {
         // Survives the capsule returning to Ready, so a failure that happened
         // while the user was typing elsewhere is still there to be found.
         let dot = Pos2::new(icon_rect.right() - 8.0, icon_rect.top() + 8.0);
-        painter.circle_filled(dot, 4.5, fade(theme::FILL));
-        painter.circle_filled(dot, 3.5, fade(theme::UNREAD_DOT));
+        painter.circle_filled(dot, 4.5, theme::FILL);
+        painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
     }
 
     if icon.clicked() {
@@ -272,47 +300,6 @@ fn paint_full(
     icon.context_menu(|ui| menu(ui, action));
 }
 
-/// The dictating capsule. Only the mark: at 84 by 28 there is no room for the
-/// label, and the mark is the part that has to stay legible while someone is
-/// actually speaking.
-///
-/// The mark box is 22 by 18, not a uniform scale of the 36 by 30 box the mark
-/// was designed against: a uniform scale that fits the 28pt capsule height
-/// would also widen the bars past what the height leaves room for. Bar width
-/// against the tallest bar's height is about 5:1 at 36x30 and about 4.9:1 at
-/// 22x18, which keeps the silhouette; 22 is close to the largest width a
-/// uniform scale of the 28pt capsule height allows, leaving 5pt above and
-/// below, and the last bar's right edge lands at 19.60 inside 22.0, so
-/// nothing clips.
-/// The mark alone, centred, at whatever size the shape can hold.
-///
-/// Both the bead and the dictating capsule are just the mark: at 46x14 and
-/// at 84x28 there is no room for the label, and the mark is the part that
-/// carries the state. Sharing one painter is what makes growing from one to
-/// the other a continuous scale of the same shape rather than a swap.
-///
-/// At bead size the three failure kinds stop being distinguishable, because
-/// the bar shapes are too small to read. That was accepted knowingly: colour
-/// still separates a failure from a success, and reaching for the capsule
-/// brings back the detail.
-fn paint_mark(
-    painter: &egui::Painter,
-    rect: Rect,
-    state: &AppState,
-    time: f64,
-    opacity: f32,
-    mark_size: Vec2,
-) {
-    let failure = failure_for(state);
-    mark::paint(
-        painter,
-        Rect::from_center_size(rect.center(), mark_size),
-        &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
-        state.mic_level,
-        time,
-        opacity,
-    );
-}
 
 /// Move the window with the pointer, rather than asking macOS to run a drag.
 ///
@@ -467,36 +454,48 @@ mod tests {
         assert_eq!(size_for(true, true, false), CapsuleSize::Full);
     }
 
-    /// The capsule is animated between sizes, so most frames are drawn at a
-    /// width that is not one of the three. A layout wider than the shape
-    /// being drawn paints a label off the end of it, which is what this
-    /// stops.
+
+    /// The capsule is animated, so it is drawn at hundreds of widths between
+    /// the three it rests at. The mark has to stay inside it at every one of
+    /// them: a mark that overhangs is the snap this geometry exists to
+    /// remove, wearing a different shape.
     #[test]
-    fn the_layout_never_claims_more_width_than_the_shape_being_drawn() {
+    fn the_mark_stays_inside_the_capsule_at_every_width_of_the_animation() {
         let mut width = theme::BEAD_SIZE.x;
         while width <= theme::CAPSULE_SIZE.x {
-            let layout = CapsuleSize::for_width(width);
+            let height = theme::BEAD_SIZE.y
+                + (theme::CAPSULE_SIZE.y - theme::BEAD_SIZE.y)
+                    * (width - theme::BEAD_SIZE.x)
+                    / (theme::CAPSULE_SIZE.x - theme::BEAD_SIZE.x);
+            let capsule =
+                Rect::from_center_size(Pos2::new(500.0, 500.0), Vec2::new(width, height));
+            let mark = mark_rect_for(capsule);
             assert!(
-                layout.points().x <= width,
-                "at {width} points wide the layout wanted {} points",
-                layout.points().x
+                capsule.contains_rect(mark),
+                "at {width} by {height} the mark {mark:?} escaped the capsule {capsule:?}"
             );
             width += 0.5;
         }
     }
 
-    /// And it must reach each layout as soon as there is room for it, or the
-    /// capsule finishes growing and keeps drawing the smaller arrangement.
+    /// And it has to arrive where the full capsule's layout expects it,
+    /// or the label it makes room for is spaced against the wrong edge.
     #[test]
-    fn each_layout_arrives_as_soon_as_it_fits() {
-        assert_eq!(CapsuleSize::for_width(theme::BEAD_SIZE.x), CapsuleSize::Bead);
-        assert_eq!(CapsuleSize::for_width(theme::ACTIVE_SIZE.x), CapsuleSize::Active);
-        assert_eq!(CapsuleSize::for_width(theme::CAPSULE_SIZE.x), CapsuleSize::Full);
-        assert_eq!(
-            CapsuleSize::for_width(theme::ACTIVE_SIZE.x - 0.1),
-            CapsuleSize::Bead,
-            "a hair too narrow for the dictating mark stays a bead"
-        );
+    fn the_mark_lands_where_the_full_capsule_wants_it() {
+        let capsule = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::CAPSULE_SIZE);
+        let mark = mark_rect_for(capsule);
+        assert_eq!(mark.left(), capsule.left() + theme::PAD_LEFT);
+        assert_eq!(mark.size(), theme::MARK_SIZE);
+    }
+
+    /// At rest it is centred, which is what makes the bead look like a bead
+    /// rather than like a capsule with its contents pushed to one side.
+    #[test]
+    fn the_mark_is_centred_in_the_bead() {
+        let bead = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::BEAD_SIZE);
+        let mark = mark_rect_for(bead);
+        assert_eq!(mark.center().x, bead.center().x);
+        assert_eq!(mark.size(), theme::BEAD_MARK_SIZE);
     }
 
     /// Largest claim wins. Pointing at the capsule during a dictation must

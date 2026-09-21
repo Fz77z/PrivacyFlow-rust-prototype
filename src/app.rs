@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
+/// How long the capsule takes to change size. This is drawing rather than an
+/// operating system window resize, so it is eased at the display's rate.
+const GROW_SECONDS: f32 = 0.18;
+
 const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 
 /// How long a dictation must be in the pipeline before the capsule says so.
@@ -20,45 +24,6 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 /// dictation, which takes about a second, still reads as instant feedback.
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
-/// Distance is measured from the edge of the rectangle the user is reaching
-/// for, not from a centre, so the bead is solid the moment the pointer is
-/// about to arrive.
-const NEAR_RADIUS: f32 = 0.0;
-/// Where it has faded as far as it goes. This is the ring between the full
-/// capsule and the edge of the catchment, so it is short by design: the
-/// pointer leaving the catchment entirely reports an infinite distance and
-/// lands on the floor.
-const FAR_RADIUS: f32 = 44.0;
-/// How faint the bead is allowed to get.
-///
-/// Deliberately not zero. LocalFlow has no Dock icon and no menu bar item, so
-/// a bead that fades to nothing is an application the user cannot find, which
-/// is the same failure as a capsule restored onto a display that is gone.
-const BEAD_OPACITY_FLOOR: f32 = 0.18;
-const _: () = assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
-
-/// How long the capsule takes to change size. This is drawing, not an
-/// operating system window resize, so it is eased at the display's rate.
-const GROW_SECONDS: f32 = 0.18;
-
-/// How far a point is from a rectangle, and zero inside it.
-fn distance_to_rect(rect: egui::Rect, point: egui::Pos2) -> f32 {
-    let dx = (rect.min.x - point.x).max(point.x - rect.max.x).max(0.0);
-    let dy = (rect.min.y - point.y).max(point.y - rect.max.y).max(0.0);
-    (dx * dx + dy * dy).sqrt()
-}
-
-/// How solid the bead should be, given how far away the pointer is.
-fn bead_opacity(distance: f32) -> f32 {
-    if distance <= NEAR_RADIUS {
-        return 1.0;
-    }
-    if distance >= FAR_RADIUS {
-        return BEAD_OPACITY_FLOOR;
-    }
-    let travelled = (distance - NEAR_RADIUS) / (FAR_RADIUS - NEAR_RADIUS);
-    1.0 - travelled * (1.0 - BEAD_OPACITY_FLOOR)
-}
 
 struct WorkItem {
     captured: CapturedAudio,
@@ -381,14 +346,14 @@ impl LocalFlowApp {
 
     /// What the capsule should be painted as, and how solid.
     ///
-    /// Returns the painted size, which is animated and so may be between the
-    /// three fixed sizes, the layout to draw at that size, and the opacity.
+    /// Returns the painted size, which is animated and so is usually between
+    /// the three fixed sizes. The capsule works out its own layout from it.
     ///
     /// The window never changes size, so nothing here touches the viewport.
     /// The pointer comes from egui rather than from the screen, because the
     /// window is now the catchment and receives real move events across the
     /// whole of it, including the parts it does not paint.
-    fn choose_shape(&mut self, ctx: &egui::Context) -> (egui::Vec2, ui::capsule::CapsuleSize, f32) {
+    fn choose_shape(&mut self, ctx: &egui::Context) -> egui::Vec2 {
         let minimal = self.state.settings.minimal_mode;
         let window = ctx.screen_rect();
         // The capsule sits in the middle of the catchment, and this is the
@@ -397,12 +362,11 @@ impl LocalFlowApp {
         // approach.
         let reach = egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE);
         let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let (pointing, distance) = match (minimal, pointer) {
-            (false, _) => (false, 0.0),
-            (true, Some(pos)) => (reach.contains(pos) || self.dragging, distance_to_rect(reach, pos)),
-            // No pointer means it is outside the catchment entirely, which is
-            // as far away as this can tell.
-            (true, None) => (self.dragging, f32::INFINITY),
+        let pointing = match (minimal, pointer) {
+            (false, _) => false,
+            (true, Some(pos)) => reach.contains(pos) || self.dragging,
+            // No pointer at all means it is outside the catchment entirely.
+            (true, None) => self.dragging,
         };
         // A dictation that has not yet retired counts as active, with one
         // exception: a startup failure deliberately clears `done_at` so it
@@ -414,24 +378,14 @@ impl LocalFlowApp {
         let active = self.state.hud != HudState::Idle
             && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
         let size = ui::capsule::size_for(minimal, pointing, active);
-        // The proximity fade belongs to the bead alone. `Full` is safe either
-        // way, since reaching it implies zero distance, but a dictation with
-        // the pointer parked elsewhere must stay fully legible rather than
-        // fading toward the floor.
-        let opacity =
-            if size == ui::capsule::CapsuleSize::Bead { bead_opacity(distance) } else { 1.0 };
         // Animated, because this is now drawing rather than an operating
         // system window resize. Both axes are eased on the same clock, so the
         // capsule cannot shear.
         let target = size.points();
-        let painted = egui::vec2(
+        egui::vec2(
             ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, GROW_SECONDS),
             ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, GROW_SECONDS),
-        );
-        // The layout follows the size actually being drawn rather than the
-        // one being animated towards, so a half grown capsule never paints a
-        // label into a window too small to hold it.
-        (painted, ui::capsule::CapsuleSize::for_width(painted.x), opacity)
+        )
     }
 }
 
@@ -509,7 +463,7 @@ impl eframe::App for LocalFlowApp {
         }
 
         self.follow_setting_with_the_window(ctx);
-        let (painted, layout, opacity) = self.choose_shape(ctx);
+        let painted = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
@@ -517,14 +471,8 @@ impl eframe::App for LocalFlowApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                let response = ui::capsule::show(
-                    ui,
-                    &self.state,
-                    ui.input(|i| i.time),
-                    painted,
-                    layout,
-                    opacity,
-                );
+                let response =
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
                 self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {
@@ -857,30 +805,4 @@ mod tests {
         sweep_audio_cache(&dir);
     }
 
-    /// The bead fades as the pointer moves away, and stops fading at a floor.
-    /// It must never reach zero: LocalFlow has no Dock icon and no menu bar
-    /// item, so a bead that can become invisible is an application with no
-    /// way back, which is the same failure as a capsule restored off screen.
-    #[test]
-    fn the_bead_fades_with_distance_but_never_disappears() {
-        assert_eq!(bead_opacity(0.0), 1.0);
-        assert_eq!(bead_opacity(NEAR_RADIUS), 1.0);
-        assert_eq!(bead_opacity(FAR_RADIUS), BEAD_OPACITY_FLOOR);
-        assert_eq!(bead_opacity(10_000.0), BEAD_OPACITY_FLOOR);
-        let middle = bead_opacity((NEAR_RADIUS + FAR_RADIUS) / 2.0);
-        assert!(middle > BEAD_OPACITY_FLOOR && middle < 1.0);
-        // The floor-is-never-zero invariant is a compile-time assertion next
-        // to the constant, not a runtime one here: see BEAD_OPACITY_FLOOR.
-    }
-
-    /// Monotonic, so the bead never brightens as the pointer retreats.
-    #[test]
-    fn the_bead_never_brightens_as_the_pointer_moves_away() {
-        let mut previous = bead_opacity(0.0);
-        for step in 1..=60 {
-            let opacity = bead_opacity(step as f32 * 10.0);
-            assert!(opacity <= previous, "opacity rose at {step}");
-            previous = opacity;
-        }
-    }
 }
