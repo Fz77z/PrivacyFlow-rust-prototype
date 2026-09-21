@@ -2,7 +2,7 @@ use crate::audio::{CapturedAudio, Microphone};
 use crate::platform::{
     frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
 };
-use crate::router::{KevWorker, Reply};
+use crate::router::{KevWorker, Reply, WorkerShutdown};
 use crate::state::{AppState, Failure, HudState, Route, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
@@ -89,6 +89,10 @@ pub struct LocalFlowApp {
     /// carries the pointer outside the window for a frame does not shrink the
     /// capsule out from under the user mid-drag.
     dragging: bool,
+    /// Stops the Python worker when the application goes away. The worker
+    /// lives on a detached thread whose stack is never unwound at process
+    /// exit, so its own `Drop` cannot be relied on to do it.
+    worker_shutdown: WorkerShutdown,
     /// The window's current size. It follows the minimal mode setting and
     /// nothing else, so it changes only when the user toggles that, never
     /// while the capsule is animating between its three painted sizes.
@@ -177,7 +181,14 @@ impl LocalFlowApp {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
-        start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
+        let worker_shutdown = WorkerShutdown::default();
+        start_pipeline_worker(
+            work_rx,
+            result_tx,
+            audio_dir,
+            cc.egui_ctx.clone(),
+            worker_shutdown.clone(),
+        );
         let centre = crate::window_position::load(&data_dir);
         // Matches what main.rs already decided the window starts at, from the
         // same setting and the same `size_for` rule. Seeded rather than left
@@ -198,6 +209,7 @@ impl LocalFlowApp {
             centre,
             dragging: false,
             window_size,
+            worker_shutdown,
         }
     }
 
@@ -389,6 +401,16 @@ impl eframe::App for LocalFlowApp {
     /// up as a rectangle around the capsule's rounded corners, and now that
     /// the window is a catchment much larger than the capsule it would show
     /// up as a rectangle around a great deal of empty space.
+    /// Stop the worker before the process goes away.
+    ///
+    /// Nothing else will. `KevWorker` kills its child when it drops, but it
+    /// is owned by a detached thread that is never unwound at exit, and for
+    /// the first ten seconds that thread is blocked inside `start` loading
+    /// models where it cannot see its channel close.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.worker_shutdown.stop();
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
@@ -541,6 +563,7 @@ fn start_pipeline_worker(
     result_tx: Sender<PipelineMessage>,
     audio_dir: PathBuf,
     repaint: egui::Context,
+    shutdown: WorkerShutdown,
 ) {
     std::thread::Builder::new()
         .name("localflow-pipeline".into())
@@ -549,7 +572,10 @@ fn start_pipeline_worker(
             // checkpoint once, then remains resident for the app lifetime.
             let mut worker = KevWorker::start().map_err(|error| error.to_string());
             match &worker {
-                Ok(_) => {
+                Ok(worker) => {
+                    // Registered the moment it exists, so quitting during the
+                    // ten seconds of model loading still stops it.
+                    shutdown.watch(worker);
                     let _ = result_tx.send(PipelineMessage::WorkerReady);
                 }
                 Err(error) => {
