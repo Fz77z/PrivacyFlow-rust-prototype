@@ -194,12 +194,16 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
         .map_err(|_| anyhow!("Could not create keyboard event source"))?;
     let down = CGEvent::new_keyboard_event(source.clone(), V_KEYCODE, true)
         .map_err(|_| anyhow!("Could not create paste key-down event"))?;
+    // Delivered straight to the destination process rather than posted to the
+    // session. We already know which process this is, and have just confirmed
+    // it is frontmost, so there is nothing to gain from routing through the
+    // window server and a session-wide post was not arriving.
     down.set_flags(CGEventFlags::CGEventFlagCommand);
-    down.post(CGEventTapLocation::Session);
+    down.post_to_pid(target_pid);
     let up = CGEvent::new_keyboard_event(source, V_KEYCODE, false)
         .map_err(|_| anyhow!("Could not create paste key-up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagCommand);
-    up.post(CGEventTapLocation::Session);
+    up.post_to_pid(target_pid);
     Ok(())
 }
 

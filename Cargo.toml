@@ -18,7 +18,10 @@ dirs = "5"
 rtrb = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24"
+# The elcapitan feature is what exposes CGEventPostToPid, which delivers the
+# paste keystroke straight to the destination process instead of posting it
+# session wide. Nothing here is newer than OS X 10.11.
+core-graphics = { version = "0.24", features = ["elcapitan"] }
 core-foundation = "0.10"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "libc"] }
 
