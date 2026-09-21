@@ -198,15 +198,11 @@ impl LocalFlowApp {
         let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
         let centre = crate::window_position::load(&data_dir, capsule_size);
         // Matches what main.rs already decided the window starts at, from the
-        // same setting. Seeded rather than left `None` so "already the right
-        // size" is true from the very first frame: an unseeded `None` would
-        // read as a change on frame one and immediately resize a window that
-        // was already correct.
-        let applied_size = Some(if state.settings.minimal_mode {
-            ui::capsule::CapsuleSize::Bead
-        } else {
-            ui::capsule::CapsuleSize::Full
-        });
+        // same setting and the same `size_for` rule. Seeded rather than left
+        // `None` so "already the right size" is true from the very first
+        // frame: an unseeded `None` would read as a change on frame one and
+        // immediately resize a window that was already correct.
+        let applied_size = Some(ui::capsule::size_for(state.settings.minimal_mode, false, false));
         Self {
             state,
             microphone,
@@ -323,6 +319,88 @@ impl LocalFlowApp {
     fn fail(&mut self, failure: Failure) {
         self.state.record_failure(failure);
     }
+
+    /// Picks the capsule's size and opacity for this frame, and keeps the
+    /// window in step with whichever size that turns out to be.
+    ///
+    /// Bundled together because minimal mode needs one measurement, the
+    /// pointer's position on screen, to answer three questions: is the user
+    /// pointing at the capsule, how solid should the bead be, and therefore
+    /// which of the three sizes applies. egui cannot supply that measurement
+    /// on its own, since it only reports the pointer relative to a window
+    /// that minimal mode is itself resizing.
+    fn choose_shape(&mut self, ctx: &egui::Context) -> (ui::capsule::CapsuleSize, f32) {
+        // Minimal mode has to know where the pointer is even when it is
+        // outside the window, which egui cannot report: it measures relative
+        // to the window, and a window that resizes under the cursor perturbs
+        // the very number deciding whether it should resize.
+        let minimal = self.state.settings.minimal_mode;
+        let (pointing, distance) = if minimal {
+            let (px, py) = crate::platform::pointer_in_window_space();
+            let rect = ctx.input(|i| i.viewport().outer_rect);
+            let pointing = rect.is_some_and(|rect| {
+                rect.contains(egui::pos2(px as f32, py as f32))
+            }) || self.dragging;
+            let distance = self
+                .centre
+                .map(|centre| {
+                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
+                })
+                .unwrap_or(0.0);
+            (pointing, distance)
+        } else {
+            (false, 0.0)
+        };
+        // A dictation that has not yet retired counts as active, with one
+        // exception: a startup failure deliberately clears `done_at` so it
+        // never retires on its own (see `new`, where `hotkey_error.or(...)`
+        // is recorded). Without carving that out, `active` would stay true
+        // for the rest of the session, which would pin a minimal-mode capsule
+        // at the dictating size forever with no user action behind it, the
+        // governing rule inverted. Every mid-dictation failure goes through
+        // `record_failure` and then `settle`, which sets `done_at`, so this
+        // only ever excludes the startup case.
+        let active = self.state.hud != HudState::Idle
+            && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
+        let size = ui::capsule::size_for(minimal, pointing, active);
+        // The proximity fade is a property of the bead, not of the capsule as
+        // a whole: `Full` happens to be safe either way, since pointing at it
+        // implies zero distance, but `Active` is not, and a dictation with
+        // the pointer parked elsewhere must stay fully legible rather than
+        // fading to the floor.
+        let opacity =
+            if size == ui::capsule::CapsuleSize::Bead { bead_opacity(distance) } else { 1.0 };
+        if minimal {
+            // Polling the pointer means an idle LocalFlow in minimal mode
+            // wakes ten times a second rather than sleeping until an event.
+            // That is the price of the proximity fade, and it is paid only
+            // while minimal mode is on, which is not the default. This is the
+            // one thing that is genuinely specific to minimal mode being on;
+            // the resize below is not, and must not be gated the same way.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        // Snapped straight to the chosen size rather than tweened towards it,
+        // so the window and the capsule `show` paints can never disagree
+        // about the size. Resized only on an actual transition to `size`,
+        // regardless of whether minimal mode is on right now, so switching it
+        // off restores a shrunk window instead of leaving it stuck.
+        let target = size.points();
+        if self.applied_size != Some(size) {
+            if let Some(centre) = self.centre {
+                let (x, y) = crate::window_position::place(
+                    centre,
+                    (target.x, target.y),
+                    &crate::platform::work_areas(),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    target.x, target.y,
+                )));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                self.applied_size = Some(size);
+            }
+        }
+        (size, opacity)
+    }
 }
 
 impl eframe::App for LocalFlowApp {
@@ -396,72 +474,9 @@ impl eframe::App for LocalFlowApp {
             }
         }
 
-        // Minimal mode has to know where the pointer is even when it is
-        // outside the window, which egui cannot report: it measures relative
-        // to the window, and a window that resizes under the cursor perturbs
-        // the very number deciding whether it should resize.
-        let minimal = self.state.settings.minimal_mode;
-        let (pointing, opacity) = if minimal {
-            let (px, py) = crate::platform::pointer_in_window_space();
-            let rect = ctx.input(|i| i.viewport().outer_rect);
-            let pointing = rect.is_some_and(|rect| {
-                rect.contains(egui::pos2(px as f32, py as f32))
-            }) || self.dragging;
-            let distance = self
-                .centre
-                .map(|centre| {
-                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
-                })
-                .unwrap_or(0.0);
-            (pointing, bead_opacity(distance))
-        } else {
-            (false, 1.0)
-        };
-        let size = ui::capsule::size_for(minimal, pointing, self.state.hud != HudState::Idle);
+        let (size, opacity) = self.choose_shape(ctx);
         let target = size.points();
         let (width, height) = (target.x, target.y);
-        if minimal {
-            // Polling the pointer means an idle LocalFlow in minimal mode
-            // wakes ten times a second rather than sleeping until an event.
-            // That is the price of the proximity fade, and it is paid only
-            // while minimal mode is on, which is not the default. This is the
-            // one thing that is genuinely specific to minimal mode being on;
-            // the resize below is not, and must not be gated the same way.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-        // Resized only on an actual transition, never merely because minimal
-        // mode is on or off. Gating this on `minimal` instead of on the size
-        // actually changing was tried and was wrong: turning minimal mode off
-        // while the window was a bead left it a bead forever, because
-        // `size_for` was already back to reporting `Full` but nothing was
-        // left to apply it. `applied_size` is seeded at construction from the
-        // size the window actually starts at, so "already the right size" is
-        // true from the first frame in both the minimal and the full case,
-        // and this block runs at all only when the window is not already
-        // what `size` calls for, which includes both the drag-off-an-edge
-        // case (identical size, nothing sent) and the toggle-off-while-a-bead
-        // case (differing size, applied once).
-        //
-        // The window is snapped straight to the chosen size rather than
-        // tweened towards it. A tween would leave the window and the capsule
-        // `show` paints disagreeing about the size for the duration of the
-        // animation, which is either clipped content on a grow or a capsule
-        // floating inside an oversized window on a shrink. `work_areas` is
-        // only asked inside this same branch, since a per-frame
-        // `NSScreen::screens` call for a size that has not changed buys
-        // nothing.
-        if self.applied_size != Some(size) {
-            if let Some(centre) = self.centre {
-                let (x, y) = crate::window_position::place(
-                    centre,
-                    (width, height),
-                    &crate::platform::work_areas(),
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
-                self.applied_size = Some(size);
-            }
-        }
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.

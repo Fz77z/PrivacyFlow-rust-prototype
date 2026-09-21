@@ -140,6 +140,13 @@ fn settings(ui: &mut Ui, state: &mut AppState, data_dir: &std::path::Path) {
     if ui.checkbox(&mut minimal_mode, "Minimal mode").changed() {
         state.settings.minimal_mode = minimal_mode;
         state.settings_write_error = crate::settings::save(data_dir, state.settings).err();
+        // A successful write means the file is no longer whatever it was
+        // when it failed to read at startup: the banner above claims the bad
+        // file is untouched, which stops being true the moment this save
+        // succeeds.
+        if state.settings_write_error.is_none() {
+            state.settings_problem = None;
+        }
     }
     ui.add_space(2.0);
     ui.label(
@@ -156,8 +163,9 @@ fn settings(ui: &mut Ui, state: &mut AppState, data_dir: &std::path::Path) {
     }
 }
 
-/// Read-only, and reports only what can actually be observed. Nothing here is
-/// configurable, because nothing in LocalFlow is configurable yet.
+/// Read-only, and reports only what can actually be observed. This tab is for
+/// checking whether things are working, not for changing them; the Settings
+/// tab is where LocalFlow's one setting lives.
 fn status(
     ui: &mut Ui,
     state: &AppState,

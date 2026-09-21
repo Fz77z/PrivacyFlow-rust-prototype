@@ -34,7 +34,10 @@ fn main() -> eframe::Result<()> {
     let remembered = window_position::load(&data_dir, size);
     let settings = settings::load(&data_dir);
     let full = ui::theme::CAPSULE_SIZE;
-    let starting = if settings.settings.minimal_mode { ui::theme::BEAD_SIZE } else { full };
+    // Neither pointing at nor dictating into a window that does not exist
+    // yet, so this asks `size_for` for the size it settles at rest: the one
+    // rule for "minimal means bead, else full" lives there and nowhere else.
+    let starting = ui::capsule::size_for(settings.settings.minimal_mode, false, false).points();
     let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([starting.x, starting.y])
             .with_min_inner_size([ui::theme::BEAD_SIZE.x, ui::theme::BEAD_SIZE.y])
