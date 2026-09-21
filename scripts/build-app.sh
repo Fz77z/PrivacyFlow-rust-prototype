@@ -50,8 +50,6 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$STAGE/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc signature. Whether this preserves permission grants across rebuilds
-# is an open question recorded in the spec; do not assume that it does.
 # Signed with a stable self-signed identity rather than ad hoc. An ad-hoc
 # signature has no identity, so macOS falls back to identifying the app by a
 # hash of its binary, and every rebuild becomes a different application whose
