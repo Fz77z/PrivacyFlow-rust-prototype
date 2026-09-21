@@ -50,9 +50,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
     // The body is everything the icon does not claim, so dragging the widget
     // works anywhere the user naturally grabs it.
     let body = ui.interact(rect, ui.id().with("capsule"), Sense::click_and_drag());
-    if body.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
+    drag_window(ui, &body);
 
     let text_left = mark_rect.right() + theme::MARK_GAP;
     match failure {
@@ -121,6 +119,42 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
     body.context_menu(|ui| menu(ui, &mut action));
     icon.context_menu(|ui| menu(ui, &mut action));
     action
+}
+
+/// Move the window with the pointer, rather than asking macOS to run a drag.
+///
+/// `ViewportCommand::StartDrag` hands off to AppKit's own window drag, which
+/// does not start for a window that refuses to become key. Since the capsule
+/// refuses on purpose, so that clicking it never takes focus from whatever is
+/// being written in, the drag is done here instead: egui already reports the
+/// pointer movement, so the position is ours to set.
+///
+/// The running position is kept rather than re-read each frame, because the
+/// window's reported rectangle lags the commands sent to it and feeding that
+/// back would make the capsule stutter behind the pointer.
+fn drag_window(ui: &Ui, body: &egui::Response) {
+    let origin_id = ui.id().with("drag_origin");
+    if body.drag_started() {
+        let position = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
+        if let Some(position) = position {
+            ui.ctx()
+                .memory_mut(|memory| memory.data.insert_temp(origin_id, position));
+        }
+    }
+    if !body.dragged() {
+        return;
+    }
+    let Some(position) = ui
+        .ctx()
+        .memory_mut(|memory| memory.data.get_temp::<Pos2>(origin_id))
+    else {
+        return;
+    };
+    let moved = position + body.drag_delta();
+    ui.ctx()
+        .memory_mut(|memory| memory.data.insert_temp(origin_id, moved));
+    ui.ctx()
+        .send_viewport_cmd(egui::ViewportCommand::OuterPosition(moved));
 }
 
 fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {
