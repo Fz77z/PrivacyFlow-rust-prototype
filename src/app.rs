@@ -85,6 +85,11 @@ struct WorkResult {
     output: String,
     timings: Timings,
     outcome: Outcome,
+    /// The utterance's WAV filename stem, which the worker sees as part of the
+    /// audio path and records against its own trace. Correlating on this rather
+    /// than on timestamps or arrival order means a dropped or reordered record
+    /// cannot silently pair the wrong halves of a dictation.
+    trace_id: Option<String>,
 }
 
 /// The pipeline thread's only way of speaking to the UI. Readiness travels
@@ -608,11 +613,42 @@ fn start_pipeline_worker(
             }
             repaint.request_repaint();
             for item in work_rx {
-                let _ = result_tx.send(process(&mut worker, &audio_dir, item));
+                let message = process(&mut worker, &audio_dir, item);
+                // Traced before the send only in the sense of being prepared
+                // here; the UI is told first, because a diagnostic must never
+                // sit between a finished dictation and the capsule showing it.
+                let trace = latency_trace_for(&message);
+                let _ = result_tx.send(message);
                 repaint.request_repaint();
+                if let Some((id, outcome, route, timings)) = trace {
+                    crate::latency_trace::record(&crate::latency_trace::LatencyTrace {
+                        trace_id: &id,
+                        captured_at: chrono::Utc::now().to_rfc3339(),
+                        outcome,
+                        route,
+                        timings: &timings,
+                    });
+                }
             }
         })
         .expect("Could not start LocalFlow pipeline worker");
+}
+
+/// Everything a finished dictation contributes to the latency dataset, or
+/// nothing when it never got far enough to have an id to correlate on.
+fn latency_trace_for(
+    message: &PipelineMessage,
+) -> Option<(String, &'static str, Option<Route>, Timings)> {
+    let PipelineMessage::Finished(result) = message else {
+        return None;
+    };
+    let id = result.trace_id.clone()?;
+    let outcome = match result.outcome {
+        Outcome::Inserted(Insertion::Pasted) => "inserted",
+        Outcome::Inserted(Insertion::CopiedOnly) => "copied",
+        Outcome::Failed(_) => "failed",
+    };
+    Some((id, outcome, result.route, result.timings.clone()))
 }
 
 /// Utterance audio is temporary, but a crash or a force quit leaves the last
@@ -660,9 +696,9 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                String::new(),
-                None,
-                String::new(),
+                // No WAV was written, so there is nothing produced and no id
+                // for a worker record to pair with.
+                Partial::default(),
                 "Transcription failed",
                 error.to_string(),
             )
@@ -670,6 +706,11 @@ fn process(
     };
     timings.capture_finalize_ms = Some(finalize_started.elapsed().as_millis());
     timings.audio_ms = Some(audio.duration.as_millis());
+    let trace_id = audio
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_owned());
 
     let inference = match worker {
         Ok(worker) => worker.transcribe_and_route(&audio.path, audio.duration),
@@ -691,9 +732,7 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                String::new(),
-                None,
-                String::new(),
+                Partial { trace_id, ..Default::default() },
                 "Transcription failed",
                 error.to_string(),
             )
@@ -712,9 +751,12 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                inference.transcript,
-                Some(inference.route),
-                String::new(),
+                Partial {
+                    transcript: inference.transcript,
+                    route: Some(inference.route),
+                    output: String::new(),
+                    trace_id,
+                },
                 "Couldn't insert",
                 "No destination app was focused when dictation started".to_owned(),
             )
@@ -727,9 +769,12 @@ fn process(
             return failed(
                 timings,
                 speech_finished,
-                inference.transcript,
-                Some(inference.route),
-                String::new(),
+                Partial {
+                    transcript: inference.transcript,
+                    route: Some(inference.route),
+                    output: String::new(),
+                    trace_id,
+                },
                 "Couldn't insert",
                 error.to_string(),
             )
@@ -743,27 +788,37 @@ fn process(
         output: inference.output,
         timings,
         outcome: Outcome::Inserted(insertion),
+        trace_id,
     }))
+}
+
+/// Whatever a lost dictation did manage to produce before it was lost. Empty
+/// for a failure early enough that nothing had been produced yet.
+#[derive(Default)]
+struct Partial {
+    transcript: String,
+    route: Option<Route>,
+    output: String,
+    trace_id: Option<String>,
 }
 
 fn failed(
     mut timings: Timings,
     speech_finished: Instant,
-    transcript: String,
-    route: Option<Route>,
-    output: String,
+    partial: Partial,
     headline: &'static str,
     error: String,
 ) -> PipelineMessage {
     timings.total_ms = Some(speech_finished.elapsed().as_millis());
     PipelineMessage::Finished(Box::new(WorkResult {
-        transcript,
-        route,
-        output,
+        transcript: partial.transcript,
+        route: partial.route,
+        output: partial.output,
         timings,
         // Every pipeline failure happens after the user has spoken, so the
         // kind is settled here: the words did not come back.
         outcome: Outcome::Failed(Failure::dropped(headline, error)),
+        trace_id: partial.trace_id,
     }))
 }
 

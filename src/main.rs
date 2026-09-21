@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod instance;
+mod latency_trace;
 mod platform;
 mod router;
 mod settings;
