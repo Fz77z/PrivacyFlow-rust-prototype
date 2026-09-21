@@ -190,12 +190,7 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
     clipboard
         .set_text(text)
         .context("Could not set macOS pasteboard")?;
-    // CombinedSessionState, not Private. A private source state is documented
-    // as being private to the process that creates it, which is the wrong
-    // thing for an event meant to arrive in somebody else's application: the
-    // paste was reaching the pasteboard and then going nowhere, in every
-    // target app, with Accessibility granted.
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+    let source = CGEventSource::new(CGEventSourceStateID::Private)
         .map_err(|_| anyhow!("Could not create keyboard event source"))?;
     let down = CGEvent::new_keyboard_event(source.clone(), V_KEYCODE, true)
         .map_err(|_| anyhow!("Could not create paste key-down event"))?;

@@ -83,6 +83,25 @@ The hotkey uses a listen-only event tap, and macOS does not reliably raise a pro
 Quit and relaunch LocalFlow after granting either one.
 The event tap is created at startup and does not pick up a grant made while the app is running.
 
+#### If a permission is listed and enabled but does not work
+
+Remove the entry and add it again. Do not toggle it off first.
+
+macOS records a permission against the signature the application had when the grant was made.
+Rebuilding LocalFlow with a different signature, which is what happened when it moved from an ad-hoc signature to the self-signed one, leaves an entry that still displays as enabled while the current binary no longer matches what was recorded.
+
+Toggling the switch off and on again does not fix this.
+That only changes the stored decision on a record that already fails to match.
+Select the entry, remove it with the minus button while it is still enabled, then add `/Applications/LocalFlow.app` again with the plus button, which writes a fresh record against the signature the app has now.
+
+This presents as the app being unable to do the thing it has permission for.
+Insertion is the clearest case: the text reaches the clipboard, a manual paste works, the app reports a successful insert, and nothing arrives at the cursor.
+
+The same work launched from a terminal will appear to behave correctly, because a process started from a shell is attributed to that shell for permission purposes and borrows its grants.
+That makes running from the terminal a misleading way to test this particular class of problem.
+
+Now that the signing identity is stable this should not recur, since rebuilds present the same signature.
+
 Do not run `tccutil reset` against these expecting a fresh prompt.
 It removes the entry and nothing re-creates it, which leaves the app quietly unable to see the hotkey or to insert text.
 
