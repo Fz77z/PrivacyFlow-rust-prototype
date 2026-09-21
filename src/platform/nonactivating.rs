@@ -16,129 +16,96 @@
 //! Its class `ElectronNSWindow` carries a `disableKeyOrMainWindow` flag and
 //! overrides exactly those two methods. Electron can do that at construction
 //! because it creates its own window. LocalFlow's window belongs to winit, so
-//! the subclass is built at runtime and the existing window is pointed at it.
+//! the subclass is declared here and the existing window is pointed at it.
 //!
-//! The subclass adds no instance variables and overrides no layout or drawing
-//! behaviour, so an existing window can be moved into it safely. It still
-//! receives mouse events: a window that cannot become key can be clicked and
-//! dragged, it simply does not take focus away from whatever has it.
+//! Three things make moving a live window into this class safe, and all three
+//! are conditions rather than hopes:
+//!
+//! 1. The subclass adds no instance variables and overrides nothing to do
+//!    with layout or drawing, so the instance size is unchanged and no
+//!    behaviour is lost. winit's own window class is likewise plain.
+//! 2. Nothing in winit asks the window for its class; it is identified by
+//!    pointer.
+//! 3. This runs at startup, before anything can have registered a
+//!    key-value observer. That matters: KVO works by secretly substituting an
+//!    `NSKVONotifying_` subclass, and changing the class afterwards would
+//!    discard it.
 
-use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
-use objc2::{msg_send, sel};
-use objc2_app_kit::NSApplication;
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, ClassType, MainThreadOnly};
+use objc2_app_kit::{NSView, NSWindow};
 use objc2_foundation::MainThreadMarker;
-use std::ffi::{c_char, c_void, CString};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-#[link(name = "objc", kind = "dylib")]
-extern "C" {
-    fn objc_allocateClassPair(
-        superclass: *const AnyClass,
-        name: *const c_char,
-        extra_bytes: usize,
-    ) -> *mut AnyClass;
-    fn objc_registerClassPair(class: *mut AnyClass);
-    fn objc_getClass(name: *const c_char) -> *const AnyClass;
-    fn class_addMethod(
-        class: *mut AnyClass,
-        name: Sel,
-        implementation: *const c_void,
-        types: *const c_char,
-    ) -> Bool;
-    fn object_setClass(object: *mut AnyObject, class: *const AnyClass) -> *const AnyClass;
-}
+define_class!(
+    // SAFETY:
+    // - NSWindow has no subclassing requirements beyond being used on the
+    //   main thread, which the thread kind below enforces.
+    // - The class adds no instance variables, so an existing window can be
+    //   moved into it without changing its size.
+    // - It does not implement Drop.
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "LocalFlowNonActivatingWindow"]
+    struct NonActivatingWindow;
 
-const SUBCLASS_NAME: &str = "LocalFlowNonActivatingWindow";
-/// Objective-C type encoding for a method returning BOOL and taking the two
-/// implicit arguments every method takes, self and the selector.
-const BOOL_METHOD_TYPES: &str = "B@:";
+    impl NonActivatingWindow {
+        /// Always no. Between them, these two are the entire subclass.
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            false
+        }
 
-/// Always NO. This is the whole behaviour of the subclass.
-extern "C" fn refuse(_this: *mut AnyObject, _cmd: Sel) -> Bool {
-    Bool::NO
-}
-
-/// Make LocalFlow's own windows refuse keyboard focus.
-///
-/// Returns whether it succeeded, so the caller can report the failure rather
-/// than leave the user wondering why clicking the capsule still steals focus.
-/// Failing here costs only the improvement: the app works exactly as it did
-/// before, so this is deliberately not fatal.
-pub fn make_windows_non_activating() -> bool {
-    let Some(marker) = MainThreadMarker::new() else {
-        return false;
-    };
-    let Some(class) = non_activating_class() else {
-        return false;
-    };
-
-    // Every window this process owns at startup is LocalFlow's own, and the
-    // console does not exist yet. The console is a normal window and is left
-    // alone: it has a title bar, and a window you can type in should take
-    // focus when you click it.
-    let application = NSApplication::sharedApplication(marker);
-    let windows = application.windows();
-    let mut changed = false;
-    for window in windows.iter() {
-        let pointer: *const _ = &*window;
-        unsafe { object_setClass(pointer as *mut AnyObject, class) };
-        changed = true;
-    }
-    changed
-}
-
-/// Build the subclass, or fetch it if a previous call already did.
-///
-/// Registering the same class name twice returns null rather than failing
-/// loudly, which is why the existing one is looked up first.
-fn non_activating_class() -> Option<*const AnyClass> {
-    let name = CString::new(SUBCLASS_NAME).ok()?;
-    let existing = unsafe { objc_getClass(name.as_ptr()) };
-    if !existing.is_null() {
-        return Some(existing);
-    }
-
-    let superclass_name = CString::new("NSWindow").ok()?;
-    let superclass = unsafe { objc_getClass(superclass_name.as_ptr()) };
-    if superclass.is_null() {
-        return None;
-    }
-
-    let class = unsafe { objc_allocateClassPair(superclass, name.as_ptr(), 0) };
-    if class.is_null() {
-        return None;
-    }
-
-    let types = CString::new(BOOL_METHOD_TYPES).ok()?;
-    let implementation = refuse as extern "C" fn(*mut AnyObject, Sel) -> Bool;
-    for selector in [sel!(canBecomeKeyWindow), sel!(canBecomeMainWindow)] {
-        let added = unsafe {
-            class_addMethod(
-                class,
-                selector,
-                implementation as *const c_void,
-                types.as_ptr(),
-            )
-        };
-        if !added.as_bool() {
-            return None;
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main_window(&self) -> bool {
+            false
         }
     }
+);
 
-    unsafe { objc_registerClassPair(class) };
-    Some(class as *const AnyClass)
-}
-
-/// Whether the capsule's window currently refuses focus.
+/// Make the capsule's window refuse keyboard focus, and report whether it
+/// worked.
 ///
-/// Reported in the console so the answer is observable rather than assumed,
-/// since the whole point is a thing that silently does not happen.
-pub fn windows_are_non_activating() -> bool {
-    let Some(marker) = MainThreadMarker::new() else {
+/// The answer is verified by asking the window afterwards rather than
+/// inferred from the fact that the call was made, because the whole feature
+/// is a thing that silently does not happen and an unchecked claim about it
+/// would be worth nothing.
+///
+/// Failing costs only the improvement: the app behaves exactly as it did
+/// before, so this is deliberately not fatal. The caller reports it.
+pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
+    // AppKit windows may only be touched from the main thread, and this
+    // class is declared main-thread-only to say so.
+    if MainThreadMarker::new().is_none() {
+        return false;
+    }
+    let Some(window) = capsule_window(handle) else {
         return false;
     };
-    let application = NSApplication::sharedApplication(marker);
-    application.windows().iter().any(|window| {
-        let can_become_key: Bool = unsafe { msg_send![&*window, canBecomeKeyWindow] };
-        !can_become_key.as_bool()
-    })
+    let class = NonActivatingWindow::class();
+    // SAFETY: the class is a direct subclass of NSWindow, adds no instance
+    // variables, and overrides only the two focus predicates. See the module
+    // documentation for why doing this to a live window is sound here.
+    unsafe {
+        let object: &AnyObject = &window;
+        AnyObject::set_class(object, class);
+    }
+    !window.canBecomeKeyWindow()
+}
+
+/// The `NSWindow` behind eframe's window handle.
+///
+/// Named explicitly rather than found by searching the application's windows.
+/// Searching happened to work, because the console does not exist yet at
+/// startup, but it reasoned about a set this code does not control.
+fn capsule_window(handle: &impl HasWindowHandle) -> Option<Retained<NSWindow>> {
+    let handle = handle.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: AppKit window handles carry a pointer to a live NSView owned by
+    // the window that is being created around this call.
+    let view: &NSView = unsafe { appkit.ns_view.cast::<NSView>().as_ref() };
+    unsafe { msg_send![view, window] }
 }

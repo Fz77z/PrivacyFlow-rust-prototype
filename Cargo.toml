@@ -21,6 +21,9 @@ rtrb = "0.3"
 core-graphics = "0.24"
 core-foundation = "0.10"
 objc2 = "0.6"
+# Same version eframe resolves to, so CreationContext's HasWindowHandle is
+# the trait this uses to reach the capsule's NSView.
+raw-window-handle = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSThread"] }
-objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSWindow", "NSResponder", "NSEvent", "NSScreen", "libc"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSWindow", "NSResponder", "NSEvent", "NSScreen", "NSView", "libc"] }
 

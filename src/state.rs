@@ -140,6 +140,11 @@ pub struct AppState {
     pub hotkey_installed: bool,
     /// Whether a microphone device opened at startup.
     pub microphone_available: bool,
+    /// Whether the capsule's window actually refuses keyboard focus, checked
+    /// once at startup by asking the window after it was changed. The class of
+    /// a window does not change afterwards, so this does not need re-asking
+    /// the way a permission does.
+    pub capsule_non_activating: bool,
     /// When the capsule last settled on a finished or failed dictation. The
     /// capsule returns to Ready 1.4s later, so the timer belongs with the
     /// result it describes.
@@ -163,6 +168,7 @@ impl Default for AppState {
             worker: WorkerStatus::Starting,
             hotkey_installed: false,
             microphone_available: false,
+            capsule_non_activating: false,
             done_at: None,
         }
     }

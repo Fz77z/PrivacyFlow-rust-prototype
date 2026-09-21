@@ -107,18 +107,20 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     } else {
         ("No device opened".to_owned(), theme::ERROR_TEXT)
     };
+    // Verified at startup by asking the capsule's own window, rather than
+    // assumed from the fact that the attempt was made. The whole behaviour is
+    // a thing that silently does not happen, so an unchecked claim about it
+    // would be worth nothing.
+    let focus = if state.capsule_non_activating {
+        ("Capsule does not take focus".to_owned(), theme::LABEL)
+    } else {
+        ("Capsule takes focus when clicked".to_owned(), theme::ERROR_TEXT)
+    };
     // Asked live rather than cached at startup, because the user can grant
     // this while the app is running and the answer is only useful if it is
     // current. Without it a dictation transcribes correctly and then nothing
     // reaches the cursor, which reads as a transcription fault rather than a
     // permission one.
-    // Asked rather than assumed, because the whole behaviour is a thing that
-    // silently does not happen and there is otherwise no way to see it.
-    let focus = if crate::platform::windows_are_non_activating() {
-        ("Capsule does not take focus".to_owned(), theme::LABEL)
-    } else {
-        ("Capsule takes focus when clicked".to_owned(), theme::ERROR_TEXT)
-    };
     let accessibility = if crate::platform::can_synthesize_input() {
         ("Allowed to send keystrokes".to_owned(), theme::LABEL)
     } else {

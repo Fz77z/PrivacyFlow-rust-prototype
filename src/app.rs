@@ -68,7 +68,7 @@ impl LocalFlowApp {
         // that. Done here because the window exists by the time this runs and
         // the console, which is a normal window and should take focus, does
         // not exist yet.
-        crate::platform::make_windows_non_activating();
+        let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
             match GlobalHotkey::right_option(move || repaint.request_repaint()) {
@@ -101,9 +101,21 @@ impl LocalFlowApp {
         let mut state = AppState {
             hotkey_installed: hotkey_error.is_none(),
             microphone_available: microphone.is_some(),
+            capsule_non_activating,
             ..Default::default()
         };
-        if let Some(failure) = hotkey_error.or(microphone_error) {
+        // Losing this is a functional problem, not a cosmetic one: a capsule
+        // that takes focus when clicked leaves the next dictation with nowhere
+        // to go, which surfaces later as "No text field focused" and looks
+        // like the user's mistake. It is reported last because the other two
+        // stop dictation outright.
+        let focus_error = (!capsule_non_activating).then(|| {
+            Failure::blocked(
+                "Capsule takes focus",
+                "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
+            )
+        });
+        if let Some(failure) = hotkey_error.or(microphone_error).or(focus_error) {
             // The dot points at the console, so the console has to have
             // something to show when the user follows it. Clearing the dwell
             // timer keeps a startup failure on the capsule indefinitely: there
