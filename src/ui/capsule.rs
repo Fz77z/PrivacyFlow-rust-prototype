@@ -103,7 +103,9 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     // The window is the catchment and never changes size while the capsule
     // animates, so the capsule is centred inside it rather than filling it.
     let rect = Rect::from_center_size(ui.max_rect().center(), painted);
-    let painter = ui.painter_at(rect);
+    // Clipped a little wider than the capsule, because the outline sits
+    // outside it and would otherwise be cut off at the very edge.
+    let painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
     let failure = failure_for(state);
     // An unread failure tints the bead, which is the only way a failure
     // raised while the user was typing elsewhere can still be seen once the
@@ -120,11 +122,21 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     // All three sizes are pills, so the radius is half the height at every
     // point of the animation. Interpolating between three stored radii would
     // be a second thing that has to agree with the first.
-    painter.rect(
-        rect.shrink(0.5),
-        Rounding::same(rect.height() / 2.0),
-        theme::FILL,
-        Stroke::new(1.0, border),
+    let radius = rect.height() / 2.0;
+    painter.rect_filled(rect, Rounding::same(radius), theme::FILL);
+    // The outline sits outside the fill rather than inside it. Stroking the
+    // shape itself puts the line within the capsule, which at bead size eats
+    // a visible share of a small shape and reads as a shrunken inner ring.
+    //
+    // The expanded rect's rounding has to grow by the same amount it was
+    // expanded by. Inheriting the shape's radius leaves the two curves
+    // non-concentric: they stay together along the straight edges and open a
+    // gap at the rounded ends, which is exactly where this capsule is all
+    // curve.
+    painter.rect_stroke(
+        rect.expand(EDGE_WIDTH / 2.0),
+        Rounding::same(radius + EDGE_WIDTH / 2.0),
+        Stroke::new(EDGE_WIDTH, border),
     );
 
     // The body is everything the icon does not claim, so dragging the widget
@@ -168,6 +180,9 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
 /// uniform scale of the 28pt capsule height allows, leaving 5pt above and
 /// below, and the last bar's right edge lands at 19.60 inside 22.0, so
 /// nothing clips.
+/// The capsule's outline, which is drawn outside the shape.
+const EDGE_WIDTH: f32 = 1.0;
+
 /// The smallest gap kept between the mark and the capsule's edge, so the
 /// mark never touches the border even when it has to be clamped to fit.
 const MARK_INSET: f32 = 3.0;

@@ -69,7 +69,10 @@ pub const FILL: Color32 = Color32::from_rgb(10, 10, 10);
 /// History cards sit on FILL and must read as raised from it, not as a
 /// different surface, so this is a single step lighter and nothing more.
 pub const CARD_FILL: Color32 = Color32::from_rgb(20, 20, 20);
-pub const BORDER: Color32 = Color32::from_rgb(38, 38, 38);
+/// Close to the fill on purpose. At bead size the capsule is mostly edge, and
+/// a border with real contrast against the fill stops reading as an edge and
+/// starts reading as a ring drawn around something.
+pub const BORDER: Color32 = Color32::from_rgb(26, 26, 26);
 
 // The text greys are neutral for the same reason as the surfaces.
 pub const LABEL: Color32 = Color32::from_rgb(245, 245, 245);
