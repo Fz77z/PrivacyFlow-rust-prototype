@@ -77,6 +77,18 @@ fn activity(ui: &mut Ui, state: &AppState) {
                         opt_ms(record.timings.insert_ms),
                         opt_ms(record.timings.total_ms),
                     ));
+                    // The capsule says "Copied" for 1400 ms and then returns
+                    // to Ready. That state only happens because the user
+                    // switched away, so the one moment they are guaranteed not
+                    // to be watching the capsule was the only moment this was
+                    // said. The durable record has to carry it.
+                    if record.insertion == Some(crate::platform::Insertion::CopiedOnly) {
+                        ui.add_space(5.0);
+                        ui.colored_label(
+                            theme::MUTED,
+                            "Copied to the clipboard, not pasted: the destination app was no                              longer frontmost.",
+                        );
+                    }
                     // The console keeps the original message, whatever the
                     // capsule had room to say.
                     if let Some(failure) = &record.failure {

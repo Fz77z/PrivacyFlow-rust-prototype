@@ -238,7 +238,7 @@ impl LocalFlowApp {
                     Insertion::Pasted => HudState::Done,
                     Insertion::CopiedOnly => HudState::Copied,
                 };
-                self.state.push_history(None);
+                self.state.push_history(None, Some(insertion));
                 self.state.done_at = Some(Instant::now());
             }
         }

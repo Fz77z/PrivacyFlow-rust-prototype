@@ -1,3 +1,4 @@
+use crate::platform::Insertion;
 use std::time::Instant;
 
 /// What the capsule is showing, which is also the app's single answer to
@@ -100,6 +101,9 @@ pub struct DebugRecord {
     pub output: String,
     pub timings: Timings,
     pub failure: Option<Failure>,
+    /// How the text got where it was going, for the dictations that succeeded.
+    /// Absent on a failure, where nothing was inserted at all.
+    pub insertion: Option<Insertion>,
 }
 
 /// What the resident Python worker is actually doing. Loading mlx-whisper and
@@ -210,11 +214,11 @@ impl AppState {
             self.clear_result();
         }
         self.last_failure = Some(failure.clone());
-        self.push_history(Some(failure));
+        self.push_history(Some(failure), None);
         self.done_at = Some(Instant::now());
     }
 
-    pub fn push_history(&mut self, failure: Option<Failure>) {
+    pub fn push_history(&mut self, failure: Option<Failure>, insertion: Option<Insertion>) {
         self.history.insert(
             0,
             DebugRecord {
@@ -224,6 +228,7 @@ impl AppState {
                 output: self.output.clone(),
                 timings: self.timings.clone(),
                 failure,
+                insertion,
             },
         );
         self.history.truncate(50);
@@ -305,7 +310,7 @@ mod tests {
     #[test]
     fn history_records_the_full_detail_not_the_headline() {
         let mut state = AppState::default();
-        state.push_history(Some(Failure::dropped("Couldn't insert", "Target application changed")));
+        state.push_history(Some(Failure::dropped("Couldn't insert", "Target application changed")), None);
         let recorded = state.history[0].failure.as_ref().unwrap();
         assert_eq!(recorded.detail, "Target application changed");
         assert_eq!(recorded.kind, FailureKind::Dropped);
@@ -344,6 +349,20 @@ mod tests {
         assert!(record.route.is_none());
         assert!(record.timings.audio_ms.is_none(), "no audio was captured to time");
         assert_eq!(record.failure.as_ref().unwrap().detail, "detail");
+    }
+
+    /// The capsule shows "Copied" for 1400 ms, and that state exists only
+    /// because the user switched away, so the moment it is shown is the moment
+    /// they are guaranteed not to be looking. If the record does not carry it,
+    /// a dictation that was never pasted is indistinguishable from one that
+    /// was, and the app has claimed a success it did not achieve.
+    #[test]
+    fn history_distinguishes_a_copied_dictation_from_a_pasted_one() {
+        let mut state = AppState { transcript: "some words".into(), ..Default::default() };
+        state.push_history(None, Some(Insertion::CopiedOnly));
+        state.push_history(None, Some(Insertion::Pasted));
+        assert_eq!(state.history[0].insertion, Some(Insertion::Pasted));
+        assert_eq!(state.history[1].insertion, Some(Insertion::CopiedOnly));
     }
 
     /// A dropped dictation is the one kind where the user spoke, so whatever
