@@ -207,38 +207,27 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 /// Where the mark goes, for a capsule painted at any size between the three.
 ///
-/// Two things move at once. The mark grows through the three mark sizes, and
-/// it slides from the middle of the capsule to the left as the label makes
-/// room for itself. Both are continuous, because the capsule is animated and
-/// anything that changes in one step during that animation reads as a snap,
-/// which is exactly what the earlier arrangement-swapping version did.
+/// The mark itself never changes size. Only its position moves: centred while
+/// the capsule is too narrow for a label, sliding to the left as the capsule
+/// opens and the label makes room for itself. That slide is continuous,
+/// because the capsule is animated and anything that changes in one step
+/// during that animation reads as a snap, which is exactly what an earlier
+/// arrangement-swapping version did.
 ///
-/// Split out from the painting so the geometry can be tested at every width
+/// Split out from the painting so the geometry can be tested at every size
 /// the animation passes through, rather than only at the three it rests at.
 fn mark_rect_for(rect: Rect) -> Rect {
-    let to_active = progress(rect.width(), theme::BEAD_SIZE.x, theme::ACTIVE_SIZE.x);
     let to_full = progress(rect.width(), theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
-    let size = if to_full > 0.0 {
-        Vec2::new(
-            lerp(theme::ACTIVE_MARK_SIZE.x, theme::MARK_SIZE.x, to_full),
-            lerp(theme::ACTIVE_MARK_SIZE.y, theme::MARK_SIZE.y, to_full),
-        )
-    } else {
-        Vec2::new(
-            lerp(theme::BEAD_MARK_SIZE.x, theme::ACTIVE_MARK_SIZE.x, to_active),
-            lerp(theme::BEAD_MARK_SIZE.y, theme::ACTIVE_MARK_SIZE.y, to_active),
-        )
-    };
-    // Clamped to fit whatever it is being painted into. The size above is a
-    // function of the capsule's width alone, so a capsule that is wide and
-    // short would otherwise be given a mark taller than itself. Width and
-    // height animate on one clock and so stay in step today, which makes that
-    // unreachable rather than impossible, and a geometry function that is
-    // only correct for the inputs it happens to be given is a trap for
-    // whoever changes the animation next. None of this binds at the three
-    // resting sizes, so it changes nothing visible.
+    // Clamped to fit whatever it is being painted into, so the function is
+    // total. Nothing clamps it at the three resting sizes, which are all
+    // built around this mark, but a geometry function that is only correct
+    // for the inputs it happens to be given is a trap for whoever changes the
+    // animation next.
     let room = rect.shrink(MARK_INSET);
-    let size = Vec2::new(size.x.min(room.width()), size.y.min(room.height()));
+    let size = Vec2::new(
+        theme::MARK_SIZE.x.min(room.width()),
+        theme::MARK_SIZE.y.min(room.height()),
+    );
     let centre_x = lerp(
         rect.center().x,
         rect.left() + theme::PAD_LEFT + size.x / 2.0,
@@ -545,7 +534,12 @@ mod tests {
         let bead = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::BEAD_SIZE);
         let mark = mark_rect_for(bead);
         assert_eq!(mark.center().x, bead.center().x);
-        assert_eq!(mark.size(), theme::BEAD_MARK_SIZE);
+        assert_eq!(
+            mark.size(),
+            theme::MARK_SIZE,
+            "the bars are the same size in every state, which is what makes them \
+             read as one object rather than as a different widget per size"
+        );
     }
 
     /// Largest claim wins. Pointing at the capsule during a dictation must

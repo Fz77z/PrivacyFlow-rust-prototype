@@ -7,28 +7,28 @@ use egui::{Color32, FontFamily, FontId, Vec2};
 pub const CAPSULE_SIZE: Vec2 = Vec2::new(240.0, 56.0);
 pub const PAD_LEFT: f32 = 17.0;
 pub const PAD_RIGHT: f32 = 10.0;
+/// The mark, at one size in every state. Keeping it constant is what makes
+/// the bars look like the same object throughout: a mark that scales with
+/// the capsule reads as a different widget at each size, and the bar width
+/// and hollow stroke are both fractions of this box, so a constant box keeps
+/// them at the values they were designed at.
 pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
-/// The bead: the capsule at rest in minimal mode. Too narrow for the label,
-/// but it carries the mark at nearly full height, so the bars read as marks
-/// rather than as specks. It shares its height with the dictating size to
-/// within a few points on purpose: starting to speak should widen the capsule
-/// and lift it very slightly, not appear to replace it with a larger one.
-pub const BEAD_SIZE: Vec2 = Vec2::new(48.0, 28.0);
-/// The mark inside the bead. The failure kinds are still not distinguishable
-/// here, which the ambient spec accepted knowingly; what survives is that
-/// something is there, and what colour it is.
-pub const BEAD_MARK_SIZE: Vec2 = Vec2::new(24.0, 14.0);
-/// The mark inside the dictating capsule. Very nearly a uniform scale of
-/// MARK_SIZE, which is what keeps the bars from looking clubbed: width
-/// against height for the tallest bar stays near 5:1, as it is at full size.
-pub const ACTIVE_MARK_SIZE: Vec2 = Vec2::new(28.0, 17.0);
+/// The bead: the capsule at rest in minimal mode.
+///
+/// Sized around the mark rather than the other way round. The mark is the
+/// same size in every state, so the bars never change dimensions as the
+/// capsule grows, and the bead has to be big enough to hold it. Too narrow
+/// for the label, which is the only thing that distinguishes it from the
+/// dictating size.
+pub const BEAD_SIZE: Vec2 = Vec2::new(52.0, 40.0);
 /// The dictating size. A step up from the bead rather than a different
 /// object: four points taller and not quite twice as wide, so beginning to
 /// speak reads as the capsule opening up rather than as a new thing arriving.
-pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 32.0);
+/// It holds the same mark at the same size; only the shape around it grows.
+pub const ACTIVE_SIZE: Vec2 = Vec2::new(96.0, 44.0);
 
 /// The window itself, which never changes size.
 ///
