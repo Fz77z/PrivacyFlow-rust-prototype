@@ -5,7 +5,12 @@ use egui::{Color32, RichText, Ui};
 /// The console is a conventional macOS window: it has a title bar, it
 /// resizes, and it never blocks dictation. Returns false when the user has
 /// asked to close it.
-pub fn show(ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Path) -> bool {
+pub fn show(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    data_dir: &std::path::Path,
+    microphone_name: Option<&str>,
+) -> bool {
     let mut stay_open = true;
     // The shared `panel_fill` is transparent because the capsule paints its
     // own shape into a transparent window. This window is an ordinary opaque
@@ -14,6 +19,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Pat
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut state.console_tab, ConsoleTab::Activity, "Activity");
+            ui.selectable_value(&mut state.console_tab, ConsoleTab::Settings, "Settings");
             ui.selectable_value(&mut state.console_tab, ConsoleTab::Status, "Status");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Quit LocalFlow").clicked() {
@@ -29,7 +35,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Pat
         ui.add_space(10.0);
         match state.console_tab {
             ConsoleTab::Activity => activity(ui, state),
-            ConsoleTab::Status => status(ui, state, data_dir),
+            ConsoleTab::Settings => settings(ui, state, data_dir),
+            ConsoleTab::Status => status(ui, state, data_dir, microphone_name),
         }
     });
     if ctx.input(|i| i.viewport().close_requested()) {
@@ -101,9 +108,70 @@ fn activity(ui: &mut Ui, state: &AppState) {
     });
 }
 
-/// Read-only, and reports only what can actually be observed. Nothing here is
-/// configurable, because nothing in LocalFlow is configurable yet.
-fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
+/// One setting. The tab is thin because LocalFlow has one thing to configure,
+/// and it should look thin rather than be padded out with controls that do
+/// not exist.
+fn settings(ui: &mut Ui, state: &mut AppState, data_dir: &std::path::Path) {
+    if let Some(problem) = state.settings_problem.clone() {
+        egui::Frame::none()
+            .fill(theme::CARD_FILL)
+            .stroke(egui::Stroke::new(1.0, theme::ERROR_BORDER))
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new("Your settings could not be read").strong());
+                ui.add_space(4.0);
+                ui.colored_label(theme::ERROR_TEXT, problem);
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "LocalFlow started on its defaults. The file is left as it is until \
+                         you change a setting here.",
+                    )
+                    .small()
+                    .color(theme::MUTED),
+                );
+            });
+        ui.add_space(14.0);
+    }
+
+    let mut minimal_mode = state.settings.minimal_mode;
+    if ui.checkbox(&mut minimal_mode, "Minimal mode").changed() {
+        state.settings.minimal_mode = minimal_mode;
+        state.settings_write_error = crate::settings::save(data_dir, state.settings).err();
+        // A successful write means the file is no longer whatever it was
+        // when it failed to read at startup: the banner above claims the bad
+        // file is untouched, which stops being true the moment this save
+        // succeeds.
+        if state.settings_write_error.is_none() {
+            state.settings_problem = None;
+        }
+    }
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Shrink the capsule to a small bead when it is not in use. It grows while you \
+             dictate, and when you point at it.",
+        )
+        .small()
+        .color(theme::MUTED),
+    );
+    if let Some(error) = &state.settings_write_error {
+        ui.add_space(6.0);
+        ui.colored_label(theme::ERROR_TEXT, format!("Not saved: {error}"));
+    }
+}
+
+/// Read-only, and reports only what can actually be observed. This tab is for
+/// checking whether things are working, not for changing them; the Settings
+/// tab is where LocalFlow's one setting lives.
+fn status(
+    ui: &mut Ui,
+    state: &AppState,
+    data_dir: &std::path::Path,
+    microphone_name: Option<&str>,
+) {
     let worker = match &state.worker {
         WorkerStatus::Starting => ("Starting".to_owned(), theme::MUTED),
         WorkerStatus::Ready => ("Ready".to_owned(), theme::INSERTED),
@@ -114,10 +182,9 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     } else {
         ("Right Option - watcher did not install".to_owned(), theme::ERROR_TEXT)
     };
-    let microphone = if state.microphone_available {
-        ("Open".to_owned(), theme::LABEL)
-    } else {
-        ("No device opened".to_owned(), theme::ERROR_TEXT)
+    let microphone = match microphone_name {
+        Some(name) => (name.to_owned(), theme::LABEL),
+        None => ("No device opened".to_owned(), theme::ERROR_TEXT),
     };
     // Verified at startup by asking the capsule's own window, rather than
     // assumed from the fact that the attempt was made. The whole behaviour is

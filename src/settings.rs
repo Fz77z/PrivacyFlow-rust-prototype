@@ -1,0 +1,155 @@
+//! What the user has chosen, and where it is kept.
+//!
+//! Shaped deliberately like `window_position`: one small file in the app's
+//! data directory, through the serde_json the app already carries, written
+//! when a control changes rather than on quit. LocalFlow has no reliable
+//! quit hook to write from, because a frameless window has no menu bar for
+//! Cmd-Q to reach.
+//!
+//! Kept separate from `window.json` because where the capsule was left is a
+//! remembered fact and this is a preference. One of them being unreadable
+//! should not cost the other.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Everything the user has chosen.
+///
+/// `serde(default)` means a field added by a later version is absent rather
+/// than fatal when an older file is read, and unknown fields are ignored, so
+/// a file written by a later version still loads here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub minimal_mode: bool,
+}
+
+/// The settings, and whatever went wrong getting them.
+///
+/// The two travel together because the caller needs both: it runs on the
+/// defaults either way, and it must report the problem rather than let a
+/// silently reverted preference look like the user's imagination.
+#[derive(Clone)]
+pub struct Load {
+    pub settings: Settings,
+    /// Present only when a file existed and could not be used. A missing file
+    /// is a first run, which is not a problem.
+    pub problem: Option<String>,
+}
+
+fn path(data_dir: &Path) -> PathBuf {
+    data_dir.join("settings.json")
+}
+
+/// Read the settings, falling back to defaults on anything unreadable and
+/// saying so.
+///
+/// The unreadable file is deliberately left on disk. It is overwritten only
+/// when the user changes a setting, because that action is the instruction to
+/// replace it; until then it survives for them to look at.
+pub fn load(data_dir: &Path) -> Load {
+    let path = path(data_dir);
+    let failed = |error: String| Load {
+        settings: Settings::default(),
+        problem: Some(format!("Could not read {}: {error}", path.display())),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Load { settings: Settings::default(), problem: None }
+        }
+        Err(error) => return failed(error.to_string()),
+    };
+    match serde_json::from_str(&text) {
+        Ok(settings) => Load { settings, problem: None },
+        Err(error) => failed(error.to_string()),
+    }
+}
+
+/// Write the settings, returning what went wrong rather than reporting it.
+///
+/// Unlike `window_position::save`, which prints and moves on, this has to
+/// come back to the caller: there is a control on screen showing the new
+/// value, and a write that failed leaves that control describing a state the
+/// application is not in.
+pub fn save(data_dir: &Path, settings: Settings) -> Result<(), String> {
+    let path = path(data_dir);
+    let text = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("Could not encode settings: {error}"))?;
+    std::fs::write(&path, text)
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each test gets its own directory. The process id keeps concurrent
+    /// `cargo test` runs from colliding, and the name says which test left it
+    /// behind if one ever fails mid-way.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("localflow-settings-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A first run has no file. That is the ordinary case and must not be
+    /// reported as a fault, or every new install starts with a red dot.
+    #[test]
+    fn a_missing_file_is_a_first_run_not_a_problem() {
+        let dir = scratch("missing");
+        let loaded = load(&dir);
+        assert_eq!(loaded.settings, Settings::default());
+        assert!(loaded.problem.is_none());
+    }
+
+    /// The opposite case, and the one that matters: a file that exists and
+    /// cannot be used must not pass silently as a first run, because the user
+    /// would see their preference revert with no explanation.
+    #[test]
+    fn a_malformed_file_gives_defaults_and_says_so() {
+        let dir = scratch("malformed");
+        std::fs::write(dir.join("settings.json"), "{ this is not json").unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.settings, Settings::default());
+        let problem = loaded.problem.expect("a broken settings file must be reported");
+        assert!(
+            problem.contains("settings.json"),
+            "the report must name the file the user has to fix: {problem}"
+        );
+    }
+
+    /// The appearance work will add fields to this file. A file written by a
+    /// later version must still load in an earlier one, and a file written by
+    /// an earlier version must not lose the setting it does have.
+    #[test]
+    fn an_unknown_field_does_not_discard_the_settings_beside_it() {
+        let dir = scratch("unknown");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"minimal_mode": true, "theme": "midnight"}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir);
+        assert!(loaded.settings.minimal_mode);
+        assert!(loaded.problem.is_none(), "an unknown field is not a fault");
+    }
+
+    #[test]
+    fn what_is_saved_is_what_loads_back() {
+        let dir = scratch("roundtrip");
+        save(&dir, Settings { minimal_mode: true }).unwrap();
+        assert!(load(&dir).settings.minimal_mode);
+    }
+
+    /// A write that cannot happen must come back as a value, not a printed
+    /// line nobody sees. A ticked checkbox that did not save is the interface
+    /// telling the user something untrue.
+    #[test]
+    fn a_write_that_cannot_happen_is_returned_not_printed() {
+        let dir = scratch("unwritable").join("no-such-directory");
+        assert!(save(&dir, Settings { minimal_mode: true }).is_err());
+    }
+}

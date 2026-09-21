@@ -175,16 +175,27 @@ pub enum Insertion {
     CopiedOnly,
 }
 
-/// Where the pointer is on screen, in Cocoa's coordinates: origin at the
-/// bottom left of the main display, y increasing upwards.
+/// Where the pointer is, in the same downward-y coordinates window positions
+/// and work areas use.
 ///
-/// Dragging needs a measurement the window cannot affect. egui reports
-/// pointer movement relative to the window, so moving the window changes the
-/// next reading, and the capsule ends up chasing a number it is perturbing,
-/// which reads as jitter. This is independent of every window in the process.
-pub fn pointer_on_screen() -> (f64, f64) {
+/// This is the one the rest of the app should use. `NSEvent::mouseLocation`
+/// measures upwards from the bottom of the primary display, which is the
+/// opposite of everything else here, and a second coordinate convention is
+/// how sign errors get in.
+///
+/// Both failure cases below are programming errors, not runtime conditions:
+/// this is only ever called from the egui update loop on the main thread,
+/// with at least one screen attached. Returning a coordinate in the wrong
+/// space if either ever fired would invert the drag silently, so both panic
+/// instead of quietly handing back a y-up number to a caller that assumes
+/// y-down.
+pub fn pointer_in_window_space() -> (f64, f64) {
     let point = NSEvent::mouseLocation();
-    (point.x, point.y)
+    let marker = MainThreadMarker::new()
+        .expect("pointer position must be read on the main thread");
+    let screens = NSScreen::screens(marker);
+    let primary = screens.firstObject().expect("no screen is attached");
+    (point.x, primary.frame().size.height - point.y)
 }
 
 /// A display's usable area: the screen minus the menu bar and the Dock.

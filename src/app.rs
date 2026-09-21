@@ -20,6 +20,30 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 /// dictation, which takes about a second, still reads as instant feedback.
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
+/// Within this distance of the capsule's centre the bead is solid.
+const NEAR_RADIUS: f32 = 120.0;
+/// Beyond this distance it has faded as far as it goes.
+const FAR_RADIUS: f32 = 420.0;
+/// How faint the bead is allowed to get.
+///
+/// Deliberately not zero. LocalFlow has no Dock icon and no menu bar item, so
+/// a bead that fades to nothing is an application the user cannot find, which
+/// is the same failure as a capsule restored onto a display that is gone.
+const BEAD_OPACITY_FLOOR: f32 = 0.18;
+const _: () = assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
+
+/// How solid the bead should be, given how far away the pointer is.
+fn bead_opacity(distance: f32) -> f32 {
+    if distance <= NEAR_RADIUS {
+        return 1.0;
+    }
+    if distance >= FAR_RADIUS {
+        return BEAD_OPACITY_FLOOR;
+    }
+    let travelled = (distance - NEAR_RADIUS) / (FAR_RADIUS - NEAR_RADIUS);
+    1.0 - travelled * (1.0 - BEAD_OPACITY_FLOOR)
+}
+
 struct WorkItem {
     captured: CapturedAudio,
     speech_finished: Instant,
@@ -69,10 +93,33 @@ pub struct LocalFlowApp {
     recording_started: Option<Instant>,
     target_pid: Option<i32>,
     data_dir: PathBuf,
+    /// Where the capsule is centred. Seeded from the remembered position at
+    /// startup, updated whenever the capsule is dragged, and read back from
+    /// the viewport on the first frame if nothing was remembered: that is the
+    /// only way to learn where the window manager actually put the window.
+    centre: Option<crate::window_position::Centre>,
+    /// Whether the capsule was being dragged last frame. Read at the top of
+    /// `update`, before this frame's response exists, so a fast drag that
+    /// carries the pointer outside the window for a frame does not shrink the
+    /// capsule out from under the user mid-drag.
+    dragging: bool,
+    /// The size the window is currently resized to. Seeded at construction
+    /// from the size the window actually starts at (which `main.rs` decides
+    /// from the same setting), then kept in step whenever the window is
+    /// resized. Compared against this frame's chosen size so the window is
+    /// only touched, and `work_areas` only queried, on an actual transition
+    /// between the three sizes, and this holds regardless of whether minimal
+    /// mode is currently on or off: it also covers being switched off while
+    /// the window is not yet full size.
+    applied_size: Option<ui::capsule::CapsuleSize>,
 }
 
 impl LocalFlowApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: PathBuf,
+        settings: crate::settings::Load,
+    ) -> Self {
         install_visuals(&cc.egui_ctx);
         // The capsule floats over whatever the user is writing in, so clicking
         // it to drag it or to open the console must not take focus away from
@@ -109,10 +156,17 @@ impl LocalFlowApp {
                 )),
             ),
         };
+        // Settings problems are reported last because the other three stop
+        // dictation outright; an unreadable settings file does not.
+        let settings_error = settings
+            .problem
+            .clone()
+            .map(|problem| Failure::blocked("Settings unreadable", problem));
         let mut state = AppState {
             hotkey_installed: hotkey_error.is_none(),
-            microphone_available: microphone.is_some(),
             capsule_non_activating,
+            settings: settings.settings,
+            settings_problem: settings.problem,
             ..Default::default()
         };
         // Losing this is a functional problem, not a cosmetic one: a capsule
@@ -126,7 +180,9 @@ impl LocalFlowApp {
                 "The capsule could not be stopped from taking keyboard focus.                  Clicking it will move focus away from what you are writing in,                  and the next dictation will report no text field focused.",
             )
         });
-        if let Some(failure) = hotkey_error.or(microphone_error).or(focus_error) {
+        if let Some(failure) =
+            hotkey_error.or(microphone_error).or(focus_error).or(settings_error)
+        {
             // The dot points at the console, so the console has to have
             // something to show when the user follows it. Clearing the dwell
             // timer keeps a startup failure on the capsule indefinitely: there
@@ -139,6 +195,14 @@ impl LocalFlowApp {
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
         start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
+        let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
+        let centre = crate::window_position::load(&data_dir, capsule_size);
+        // Matches what main.rs already decided the window starts at, from the
+        // same setting and the same `size_for` rule. Seeded rather than left
+        // `None` so "already the right size" is true from the very first
+        // frame: an unseeded `None` would read as a change on frame one and
+        // immediately resize a window that was already correct.
+        let applied_size = Some(ui::capsule::size_for(state.settings.minimal_mode, false, false));
         Self {
             state,
             microphone,
@@ -149,6 +213,9 @@ impl LocalFlowApp {
             recording_started: None,
             target_pid: None,
             data_dir,
+            centre,
+            dragging: false,
+            applied_size,
         }
     }
 
@@ -252,6 +319,88 @@ impl LocalFlowApp {
     fn fail(&mut self, failure: Failure) {
         self.state.record_failure(failure);
     }
+
+    /// Picks the capsule's size and opacity for this frame, and keeps the
+    /// window in step with whichever size that turns out to be.
+    ///
+    /// Bundled together because minimal mode needs one measurement, the
+    /// pointer's position on screen, to answer three questions: is the user
+    /// pointing at the capsule, how solid should the bead be, and therefore
+    /// which of the three sizes applies. egui cannot supply that measurement
+    /// on its own, since it only reports the pointer relative to a window
+    /// that minimal mode is itself resizing.
+    fn choose_shape(&mut self, ctx: &egui::Context) -> (ui::capsule::CapsuleSize, f32) {
+        // Minimal mode has to know where the pointer is even when it is
+        // outside the window, which egui cannot report: it measures relative
+        // to the window, and a window that resizes under the cursor perturbs
+        // the very number deciding whether it should resize.
+        let minimal = self.state.settings.minimal_mode;
+        let (pointing, distance) = if minimal {
+            let (px, py) = crate::platform::pointer_in_window_space();
+            let rect = ctx.input(|i| i.viewport().outer_rect);
+            let pointing = rect.is_some_and(|rect| {
+                rect.contains(egui::pos2(px as f32, py as f32))
+            }) || self.dragging;
+            let distance = self
+                .centre
+                .map(|centre| {
+                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
+                })
+                .unwrap_or(0.0);
+            (pointing, distance)
+        } else {
+            (false, 0.0)
+        };
+        // A dictation that has not yet retired counts as active, with one
+        // exception: a startup failure deliberately clears `done_at` so it
+        // never retires on its own (see `new`, where `hotkey_error.or(...)`
+        // is recorded). Without carving that out, `active` would stay true
+        // for the rest of the session, which would pin a minimal-mode capsule
+        // at the dictating size forever with no user action behind it, the
+        // governing rule inverted. Every mid-dictation failure goes through
+        // `record_failure` and then `settle`, which sets `done_at`, so this
+        // only ever excludes the startup case.
+        let active = self.state.hud != HudState::Idle
+            && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
+        let size = ui::capsule::size_for(minimal, pointing, active);
+        // The proximity fade is a property of the bead, not of the capsule as
+        // a whole: `Full` happens to be safe either way, since pointing at it
+        // implies zero distance, but `Active` is not, and a dictation with
+        // the pointer parked elsewhere must stay fully legible rather than
+        // fading to the floor.
+        let opacity =
+            if size == ui::capsule::CapsuleSize::Bead { bead_opacity(distance) } else { 1.0 };
+        if minimal {
+            // Polling the pointer means an idle LocalFlow in minimal mode
+            // wakes ten times a second rather than sleeping until an event.
+            // That is the price of the proximity fade, and it is paid only
+            // while minimal mode is on, which is not the default. This is the
+            // one thing that is genuinely specific to minimal mode being on;
+            // the resize below is not, and must not be gated the same way.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        // Snapped straight to the chosen size rather than tweened towards it,
+        // so the window and the capsule `show` paints can never disagree
+        // about the size. Resized only on an actual transition to `size`,
+        // regardless of whether minimal mode is on right now, so switching it
+        // off restores a shrunk window instead of leaving it stuck.
+        let target = size.points();
+        if self.applied_size != Some(size) {
+            if let Some(centre) = self.centre {
+                let (x, y) = crate::window_position::place(
+                    centre,
+                    (target.x, target.y),
+                    &crate::platform::work_areas(),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    target.x, target.y,
+                )));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                self.applied_size = Some(size);
+            }
+        }
+        (size, opacity)
+    }
 }
 
 impl eframe::App for LocalFlowApp {
@@ -313,13 +462,32 @@ impl eframe::App for LocalFlowApp {
             ctx.request_repaint_after(PROCESSING_ANNOUNCE_DELAY);
         }
 
+        // Where the capsule has never been moved and nothing was remembered,
+        // there is nothing to place it from until the window manager has put
+        // it somewhere. That position only exists once the viewport has been
+        // shown, so it is read back here, on the first frame it is available,
+        // rather than guessed at construction.
+        if self.centre.is_none() {
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                self.centre =
+                    Some(crate::window_position::Centre { x: rect.center().x, y: rect.center().y });
+            }
+        }
+
+        let (size, opacity) = self.choose_shape(ctx);
+        let target = size.points();
+        let (width, height) = (target.x, target.y);
+
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
         let mut raise_console = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                if let Some(action) = ui::capsule::show(ui, &self.state, ui.input(|i| i.time)) {
+                let response =
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), size, opacity);
+                self.dragging = response.dragging;
+                if let Some(action) = response.action {
                     match action {
                         ui::capsule::CapsuleAction::ToggleConsole => {
                             if self.state.console_open {
@@ -336,13 +504,12 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
-                            crate::window_position::save(
-                                &self.data_dir,
-                                crate::window_position::WindowPosition {
-                                    x: position.x,
-                                    y: position.y,
-                                },
-                            );
+                            let centre = crate::window_position::Centre {
+                                x: position.x + width / 2.0,
+                                y: position.y + height / 2.0,
+                            };
+                            self.centre = Some(centre);
+                            crate::window_position::save(&self.data_dir, centre);
                         }
                         ui::capsule::CapsuleAction::Quit => {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close)
@@ -358,6 +525,7 @@ impl eframe::App for LocalFlowApp {
                 .with_min_inner_size([520.0, 400.0]);
             let data_dir = self.data_dir.clone();
             let state = &mut self.state;
+            let microphone_name = self.microphone.as_ref().map(|m| m.device_name());
             // Immediate rather than deferred: a deferred viewport's callback must be
             // Fn + Send + Sync + 'static, which would force AppState behind a mutex
             // for no reason other than the signature.
@@ -368,7 +536,7 @@ impl eframe::App for LocalFlowApp {
                     if raise_console {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
-                    ui::console::show(ctx, state, &data_dir)
+                    ui::console::show(ctx, state, &data_dir, microphone_name)
                 },
             );
             if !stay_open {
@@ -595,5 +763,32 @@ mod tests {
         // a failure worth reporting.
         std::fs::remove_dir_all(&dir).unwrap();
         sweep_audio_cache(&dir);
+    }
+
+    /// The bead fades as the pointer moves away, and stops fading at a floor.
+    /// It must never reach zero: LocalFlow has no Dock icon and no menu bar
+    /// item, so a bead that can become invisible is an application with no
+    /// way back, which is the same failure as a capsule restored off screen.
+    #[test]
+    fn the_bead_fades_with_distance_but_never_disappears() {
+        assert_eq!(bead_opacity(0.0), 1.0);
+        assert_eq!(bead_opacity(NEAR_RADIUS), 1.0);
+        assert_eq!(bead_opacity(FAR_RADIUS), BEAD_OPACITY_FLOOR);
+        assert_eq!(bead_opacity(10_000.0), BEAD_OPACITY_FLOOR);
+        let middle = bead_opacity((NEAR_RADIUS + FAR_RADIUS) / 2.0);
+        assert!(middle > BEAD_OPACITY_FLOOR && middle < 1.0);
+        // The floor-is-never-zero invariant is a compile-time assertion next
+        // to the constant, not a runtime one here: see BEAD_OPACITY_FLOOR.
+    }
+
+    /// Monotonic, so the bead never brightens as the pointer retreats.
+    #[test]
+    fn the_bead_never_brightens_as_the_pointer_moves_away() {
+        let mut previous = bead_opacity(0.0);
+        for step in 1..=60 {
+            let opacity = bead_opacity(step as f32 * 10.0);
+            assert!(opacity <= previous, "opacity rose at {step}");
+            previous = opacity;
+        }
     }
 }
