@@ -114,7 +114,7 @@ pub const MARK_UNLIT: Color32 = Color32::from_rgb(107, 71, 71);
 
 /// Named so call sites read as intent rather than as a magic family string.
 pub fn label_font() -> FontId {
-    FontId::new(13.5, FontFamily::Name("semibold".into()))
+    FontId::new(12.0, FontFamily::Name("semibold".into()))
 }
 
 /// Errors are deliberately quieter than the healthy states, so the failure

@@ -180,6 +180,15 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
 /// uniform scale of the 28pt capsule height allows, leaving 5pt above and
 /// below, and the last bar's right edge lands at 19.60 inside 22.0, so
 /// nothing clips.
+/// The cog, which is the console icon. One stroke weight throughout, kept
+/// thin: the glyph is small and a heavy line turns it into a drawing of a
+/// cog rather than an icon of one.
+const COG_STROKE: f32 = 1.1;
+const COG_RING: f32 = 5.4;
+const COG_HUB: f32 = 1.9;
+const COG_TOOTH_TIP: f32 = 8.0;
+const COG_TEETH: usize = 8;
+
 /// The capsule's outline, which is drawn outside the shape.
 const EDGE_WIDTH: f32 = 1.0;
 
@@ -439,25 +448,35 @@ fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {
     }
 }
 
-/// A window with a title bar and two lines of text: the icon says "opens the
-/// other window" rather than promising settings that do not exist.
+/// A cog, thinly drawn.
+///
+/// It used to be a window with a rule through it, chosen deliberately so the
+/// icon promised "this opens the other window" rather than promising settings
+/// that did not exist. They exist now, and the console's middle tab is where
+/// they live, so a cog is the honest icon rather than the misleading one.
+///
+/// Built from three shapes at one stroke weight: a ring, eight teeth standing
+/// on it, and a hub. Thin on purpose. At 36 points the heavy 1.5pt outline
+/// the old glyph used read as a drawn box rather than as an icon.
 fn paint_console_glyph(painter: &egui::Painter, rect: Rect, tint: Color32) {
-    // Two shapes, not four. An earlier version drew a title rule and two
-    // content lines inside the same box, and at this size two one point
-    // lines three points apart do not read as two lines, they read as a
-    // grey smudge. One centred rule carries the same meaning legibly.
-    let glyph = Rect::from_center_size(rect.center(), Vec2::new(19.0, 15.0));
-    let stroke = Stroke::new(1.5, tint);
-    painter.rect_stroke(glyph, Rounding::same(4.5), stroke);
-    let rule_y = glyph.center().y;
-    let inset = 4.5;
-    painter.line_segment(
-        [
-            Pos2::new(glyph.left() + inset, rule_y),
-            Pos2::new(glyph.right() - inset, rule_y),
-        ],
-        stroke,
-    );
+    let centre = rect.center();
+    let stroke = Stroke::new(COG_STROKE, tint);
+    painter.circle_stroke(centre, COG_RING, stroke);
+    painter.circle_stroke(centre, COG_HUB, stroke);
+    for tooth in 0..COG_TEETH {
+        // Offset by half a step so no tooth sits on the vertical, which reads
+        // as an arrow rather than as part of a ring.
+        let angle = std::f32::consts::TAU * (tooth as f32 + 0.5) / COG_TEETH as f32;
+        let (sin, cos) = angle.sin_cos();
+        let direction = Vec2::new(cos, sin);
+        painter.line_segment(
+            [
+                centre + direction * (COG_RING - COG_STROKE / 2.0),
+                centre + direction * COG_TOOTH_TIP,
+            ],
+            stroke,
+        );
+    }
 }
 
 #[cfg(test)]
