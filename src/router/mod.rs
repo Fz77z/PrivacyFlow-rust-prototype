@@ -53,6 +53,15 @@ pub struct InferenceResult {
 pub enum Reply {
     Transcribed(InferenceResult),
     NoSpeech,
+    /// The utterance failed after the worker had already recognised speech.
+    /// It carries the transcript so the words can be preserved rather than
+    /// lost: routing, rewriting and the safety guards can all refuse without
+    /// the user losing what they said. `transcript` is absent when the
+    /// failure happened before there was anything to recognise.
+    Failed {
+        message: String,
+        transcript: Option<String>,
+    },
 }
 
 /// The resident bridge to the exact research setup: mlx-whisper large-v3-turbo
@@ -218,7 +227,13 @@ fn parse_response(line: &str) -> Result<Reply> {
     let response: Response =
         serde_json::from_str(line).context("Inference worker sent invalid JSON")?;
     if let Some(error) = response.error {
-        return Err(anyhow!(error));
+        // A per-utterance failure, not a broken worker, so it travels as a
+        // reply rather than an error: the worker is still healthy and the
+        // next dictation must not be poisoned by this one.
+        return Ok(Reply::Failed {
+            message: error,
+            transcript: response.transcript,
+        });
     }
     // Checked after the error and before everything else: a reply that says
     // nothing was said carries none of the fields a transcript must have.
@@ -443,18 +458,39 @@ mod tests {
     /// the error is read first.
     #[test]
     fn an_error_is_still_a_failure_even_beside_a_no_speech_flag() {
-        let error = parse_response(r#"{"no_speech": true, "error": "worker died"}"#)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "worker died");
+        let Reply::Failed { message, .. } =
+            parse_response(r#"{"no_speech": true, "error": "worker died"}"#).unwrap()
+        else {
+            panic!("an error outranks a no-speech flag");
+        };
+        assert_eq!(message, "worker died");
     }
 
+    /// A per-utterance failure travels as a reply rather than an error: the
+    /// worker is still healthy, and the next dictation must not be poisoned.
     #[test]
     fn a_worker_error_reply_is_reported_and_never_produces_text() {
-        let error = parse_response(r#"{"error": "COMPLEX processing is not implemented yet"}"#)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "COMPLEX processing is not implemented yet");
+        let Reply::Failed { message, transcript } =
+            parse_response(r#"{"error": "COMPLEX processing is not implemented yet"}"#).unwrap()
+        else {
+            panic!("an error reply is a failure, not a transcript");
+        };
+        assert_eq!(message, "COMPLEX processing is not implemented yet");
+        assert_eq!(transcript, None, "this failure produced no words to preserve");
+    }
+
+    /// Once the worker has recognised speech, a later failure must not take
+    /// the words with it: they travel back so the app can preserve them.
+    #[test]
+    fn a_failure_after_recognition_carries_the_words_for_preservation() {
+        let Reply::Failed { message, transcript } = parse_response(
+            r#"{"error": "S1-mini returned an empty rewrite", "transcript": "what I said"}"#,
+        )
+        .unwrap() else {
+            panic!("expected a failure");
+        };
+        assert_eq!(message, "S1-mini returned an empty rewrite");
+        assert_eq!(transcript.as_deref(), Some("what I said"));
     }
 
     /// The bug this guards: the timeout used to equal the recorder's maximum

@@ -699,6 +699,19 @@ fn process(
         Ok(Reply::Transcribed(inference)) => inference,
         // Nothing was said, so there is nothing to route, insert or file.
         Ok(Reply::NoSpeech) => return PipelineMessage::NoSpeech,
+        // The pipeline failed after recognising speech. The failure stands,
+        // and the words are not thrown away with it.
+        Ok(Reply::Failed { message, transcript }) => {
+            let words = transcript.unwrap_or_default();
+            let preserved = preserve(&words, || Preserved::Raw);
+            return failed(
+                timings,
+                speech_finished,
+                Partial { transcript: words, trace_id, ..Default::default() },
+                "Dictation failed",
+                failure_detail(&message, &preserved),
+            );
+        }
         Err(error) => {
             return failed(
                 timings,
@@ -725,11 +738,16 @@ fn process(
                 Partial {
                     transcript: inference.transcript,
                     route: Some(inference.route),
-                    output: String::new(),
+                    output: inference.output.clone(),
                     trace_id,
                 },
                 "Couldn't insert",
-                "No destination app was focused when dictation started".to_owned(),
+                // Processing succeeded, so what is preserved is the finished
+                // text rather than the raw transcription.
+                failure_detail(
+                    "No destination app was focused when dictation started.",
+                    &preserve(&inference.output, || Preserved::Processed),
+                ),
             )
         }
     };
@@ -761,6 +779,55 @@ fn process(
         outcome: Outcome::Inserted(insertion),
         trace_id,
     }))
+}
+
+/// What became of the user's words when the pipeline failed after producing
+/// them. Preserving is not inserting: text that failed its processing is never
+/// typed into the document as though it had succeeded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Preserved {
+    /// The raw transcription, because processing never completed.
+    Raw,
+    /// The finished text, which processing produced but insertion could not place.
+    Processed,
+    /// The words could not even be put on the pasteboard.
+    Unavailable(String),
+}
+
+/// The detail the console shows for a failure that happened after the user's
+/// words existed.
+///
+/// The original failure always leads: preservation is something that also
+/// happened, never a replacement for the reason. A failed preservation is
+/// reported alongside rather than swallowed, and raw text is never described
+/// as though it had been processed.
+pub fn failure_detail(original: &str, preserved: &Preserved) -> String {
+    match preserved {
+        Preserved::Raw => format!(
+            "{original} Your words are on the clipboard: press Cmd-V to place them. \
+             This is the raw transcription, not the processed text."
+        ),
+        Preserved::Processed => format!(
+            "{original} The finished text is on the clipboard: press Cmd-V to place it."
+        ),
+        Preserved::Unavailable(why) => format!(
+            "{original} The words could not be put on the clipboard either: {why}"
+        ),
+    }
+}
+
+/// Put a failed dictation's words somewhere the user can reach them.
+///
+/// Reports what happened rather than returning a Result, because a failure
+/// here must never replace the failure that lost the dictation.
+fn preserve(text: &str, kind: fn() -> Preserved) -> Preserved {
+    if text.is_empty() {
+        return Preserved::Unavailable("there was no text to preserve".to_owned());
+    }
+    match crate::platform::copy_to_pasteboard(text) {
+        Ok(()) => kind(),
+        Err(error) => Preserved::Unavailable(format!("{error:#}")),
+    }
 }
 
 /// Whatever a lost dictation did manage to produce before it was lost. Empty
@@ -828,4 +895,56 @@ mod tests {
         sweep_audio_cache(&dir);
     }
 
+}
+
+#[cfg(test)]
+mod preservation_tests {
+    use super::*;
+
+    /// The failure that lost the dictation is what the user needs to read.
+    /// Preservation is something that also happened, never a replacement.
+    #[test]
+    fn the_original_failure_leads_and_preservation_follows() {
+        let detail = failure_detail("S1-mini failed to process this LIGHT_CLEANUP utterance.",
+                                    &Preserved::Raw);
+        assert!(detail.starts_with("S1-mini failed to process this LIGHT_CLEANUP utterance."));
+        assert!(detail.contains("clipboard"));
+    }
+
+    /// Raw text must never be described as though it had been processed. The
+    /// user is deciding whether to paste it, and that decision needs the truth.
+    #[test]
+    fn raw_text_is_not_presented_as_processed() {
+        let detail = failure_detail("Routing failed.", &Preserved::Raw);
+        assert!(detail.contains("raw transcription"));
+        assert!(!detail.contains("finished text"));
+    }
+
+    #[test]
+    fn processed_text_is_described_as_finished() {
+        let detail = failure_detail("No destination app was focused.", &Preserved::Processed);
+        assert!(detail.contains("finished text"));
+        assert!(!detail.contains("raw transcription"));
+    }
+
+    /// A clipboard failure is a second problem, not a replacement for the first.
+    #[test]
+    fn a_preservation_failure_is_reported_beside_the_original_not_instead_of_it() {
+        let detail = failure_detail(
+            "COMPLEX processing is not implemented yet.",
+            &Preserved::Unavailable("Could not access macOS pasteboard".to_owned()),
+        );
+        assert!(detail.contains("COMPLEX processing is not implemented yet."),
+                "the original failure must survive a failed preservation");
+        assert!(detail.contains("Could not access macOS pasteboard"));
+    }
+
+    /// An ASR failure has nothing to preserve, and must not claim otherwise.
+    #[test]
+    fn nothing_is_claimed_when_there_were_no_words() {
+        let preserved = preserve("", || Preserved::Raw);
+        assert_eq!(preserved, Preserved::Unavailable("there was no text to preserve".to_owned()));
+        let detail = failure_detail("Transcription failed.", &preserved);
+        assert!(!detail.contains("press Cmd-V"));
+    }
 }

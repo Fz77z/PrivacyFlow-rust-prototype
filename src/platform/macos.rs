@@ -255,6 +255,19 @@ pub fn frontmost_application_pid() -> Option<i32> {
 /// The transcript stays on the pasteboard: restoring it on a timer can race a
 /// busy target application's asynchronous paste handling and insert stale data.
 /// Accessibility permission is required for the synthesized key event.
+/// Put text on the pasteboard and nothing else.
+///
+/// Used to preserve a dictation whose pipeline failed after the words existed.
+/// Deliberately separate from insertion: preserving is not inserting, and text
+/// that failed its processing must never be typed into the user's document as
+/// though it had succeeded.
+pub fn copy_to_pasteboard(text: &str) -> Result<()> {
+    let mut clipboard = Clipboard::new().context("Could not access macOS pasteboard")?;
+    clipboard
+        .set_text(text)
+        .context("Could not set macOS pasteboard")
+}
+
 pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     // The pasteboard is written first, before anything that can refuse, so
     // that every path from here on leaves the user holding their words. An
@@ -262,10 +275,7 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     // writing, which meant the one case where the user most needed the
     // transcript, the case where LocalFlow could not place it for them, was
     // the case that threw it away.
-    let mut clipboard = Clipboard::new().context("Could not access macOS pasteboard")?;
-    clipboard
-        .set_text(text)
-        .context("Could not set macOS pasteboard")?;
+    copy_to_pasteboard(text)?;
     // Reported as a failure rather than as CopiedOnly, even though the words
     // survived both ways. CopiedOnly means the destination moved, which is
     // ordinary and carries no remedy. This is a configuration fault with a
