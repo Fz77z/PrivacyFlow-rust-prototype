@@ -107,6 +107,19 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     } else {
         ("No device opened".to_owned(), theme::ERROR_TEXT)
     };
+    // Asked live rather than cached at startup, because the user can grant
+    // this while the app is running and the answer is only useful if it is
+    // current. Without it a dictation transcribes correctly and then nothing
+    // reaches the cursor, which reads as a transcription fault rather than a
+    // permission one.
+    let accessibility = if crate::platform::can_synthesize_input() {
+        ("Allowed to send keystrokes".to_owned(), theme::LABEL)
+    } else {
+        (
+            "Not allowed - add LocalFlow to Accessibility, then relaunch".to_owned(),
+            theme::ERROR_TEXT,
+        )
+    };
     // Ask the router how it resolved the research root, and let it decide what
     // counts as present, rather than recomputing either here. Validating with a
     // local is_dir() used to let this row read healthy at the same moment the
@@ -121,6 +134,7 @@ fn status(ui: &mut Ui, state: &AppState, data_dir: &std::path::Path) {
     egui::Grid::new("status").num_columns(2).spacing([18.0, 10.0]).show(ui, |ui| {
         row(ui, "Hotkey", &hotkey.0, hotkey.1);
         row(ui, "Microphone", &microphone.0, microphone.1);
+        row(ui, "Accessibility", &accessibility.0, accessibility.1);
         row(ui, "Inference worker", &worker.0, worker.1);
         row(ui, "ASR", "mlx-community/whisper-large-v3-turbo", theme::LABEL);
         row(ui, "Router", "scaling_run/checkpoints/pool_300", theme::LABEL);

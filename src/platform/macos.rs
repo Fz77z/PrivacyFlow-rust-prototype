@@ -27,6 +27,20 @@ fn right_option_is_down(flags: CGEventFlags) -> bool {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    /// Whether this process may post synthetic keyboard events, which is what
+    /// System Settings calls Accessibility.
+    fn AXIsProcessTrusted() -> bool;
+}
+
+/// Whether macOS will actually deliver the synthetic keystrokes LocalFlow
+/// uses to paste.
+///
+/// This has to be asked rather than inferred from the result of posting an
+/// event. `CGEvent::post` returns nothing at all: without Accessibility the
+/// system discards the event silently, so the paste looks like it worked,
+/// the timings look healthy, and nothing arrives at the cursor.
+pub fn can_synthesize_input() -> bool {
+    unsafe { AXIsProcessTrusted() }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -161,6 +175,15 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
     if frontmost_application_pid() != Some(target_pid) {
         return Err(anyhow!(
             "The destination app changed while dictating; text was not inserted"
+        ));
+    }
+    // Checked before the pasteboard is touched, so a missing permission does
+    // not silently replace the user's clipboard on the way to doing nothing.
+    if !can_synthesize_input() {
+        return Err(anyhow!(
+            "LocalFlow is not allowed to send keystrokes, so the text could not be \
+             pasted. Add LocalFlow to System Settings, Privacy and Security, \
+             Accessibility, then quit and relaunch it."
         ));
     }
     let mut clipboard = Clipboard::new().context("Could not access macOS pasteboard")?;
