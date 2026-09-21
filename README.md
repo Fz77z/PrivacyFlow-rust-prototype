@@ -149,6 +149,3 @@ LocalFlow never quietly inserts the raw transcript when processing was supposed 
 
 Every successfully transcribed utterance is still written through the existing shadow collector before insertion. A burned batch is rejected before it can be appended; LocalFlow reports the collection problem without silently creating or contaminating an evaluation batch.
 
-## Testing
-
-See [TESTING.md](TESTING.md) for the intentionally small FAST, CONFIDENCE, and DEEP validation paths.
