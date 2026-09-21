@@ -301,7 +301,7 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
         let window = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
         match window {
             Some(window) => {
-                let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
+                let (pointer_x, pointer_y) = crate::platform::pointer_in_window_space();
                 ui.ctx().memory_mut(|memory| {
                     memory.data.insert_temp(
                         anchor_id,
@@ -331,12 +331,13 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
     if !body.dragged() {
         return None;
     }
-    let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
-    // Cocoa measures upwards from the bottom of the screen and egui measures
-    // downwards from the top, so the vertical movement is inverted.
+    let (pointer_x, pointer_y) = crate::platform::pointer_in_window_space();
     // Both terms are differences from the anchor, so the shared origin cancels
     // and this is correct for displays left of or above the main one, and
-    // across a drag between displays of different scale factors.
+    // across a drag between displays of different scale factors. The vertical
+    // term is no longer negated here: `pointer_in_window_space` already
+    // converts Cocoa's upward-y into the same downward-y egui uses, so both
+    // sides of the subtraction share one convention.
     // It does assume egui's zoom factor is 1.0: the anchor is in egui points
     // and the pointer delta is in raw Cocoa points, so a zoom would track at
     // the wrong rate. Left as an assumption rather than handled, because
@@ -347,7 +348,7 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
     // one point border while it moves.
     let moved = Pos2::new(
         (anchor.window.x + (pointer_x - anchor.pointer_x) as f32).round(),
-        (anchor.window.y - (pointer_y - anchor.pointer_y) as f32).round(),
+        (anchor.window.y + (pointer_y - anchor.pointer_y) as f32).round(),
     );
     ui.ctx().memory_mut(|memory| {
         memory.data.insert_temp(anchor_id, DragAnchor { settled: moved, ..anchor })

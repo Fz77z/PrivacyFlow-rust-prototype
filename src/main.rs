@@ -33,17 +33,20 @@ fn main() -> eframe::Result<()> {
     let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
     let remembered = window_position::load(&data_dir, size);
     let settings = settings::load(&data_dir);
+    let full = ui::theme::CAPSULE_SIZE;
+    let starting = if settings.settings.minimal_mode { ui::theme::BEAD_SIZE } else { full };
     let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
-            .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
-            .with_max_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
+            .with_inner_size([starting.x, starting.y])
+            .with_min_inner_size([ui::theme::BEAD_SIZE.x, ui::theme::BEAD_SIZE.y])
+            .with_max_inner_size([full.x, full.y])
             .with_resizable(false)
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
             .with_title("LocalFlow");
     if let Some(centre) = remembered {
-        let (x, y) = window_position::place(centre, size, &platform::work_areas());
+        let starting_size = (starting.x, starting.y);
+        let (x, y) = window_position::place(centre, starting_size, &platform::work_areas());
         viewport = viewport.with_position([x, y]);
     }
     let options = eframe::NativeOptions {

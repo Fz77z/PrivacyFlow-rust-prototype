@@ -20,6 +20,29 @@ const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 /// dictation, which takes about a second, still reads as instant feedback.
 const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
 
+/// Within this distance of the capsule's centre the bead is solid.
+const NEAR_RADIUS: f32 = 120.0;
+/// Beyond this distance it has faded as far as it goes.
+const FAR_RADIUS: f32 = 420.0;
+/// How faint the bead is allowed to get.
+///
+/// Deliberately not zero. LocalFlow has no Dock icon and no menu bar item, so
+/// a bead that fades to nothing is an application the user cannot find, which
+/// is the same failure as a capsule restored onto a display that is gone.
+const BEAD_OPACITY_FLOOR: f32 = 0.18;
+
+/// How solid the bead should be, given how far away the pointer is.
+fn bead_opacity(distance: f32) -> f32 {
+    if distance <= NEAR_RADIUS {
+        return 1.0;
+    }
+    if distance >= FAR_RADIUS {
+        return BEAD_OPACITY_FLOOR;
+    }
+    let travelled = (distance - NEAR_RADIUS) / (FAR_RADIUS - NEAR_RADIUS);
+    1.0 - travelled * (1.0 - BEAD_OPACITY_FLOOR)
+}
+
 struct WorkItem {
     captured: CapturedAudio,
     speech_finished: Instant,
@@ -69,6 +92,16 @@ pub struct LocalFlowApp {
     recording_started: Option<Instant>,
     target_pid: Option<i32>,
     data_dir: PathBuf,
+    /// Where the capsule is centred. Seeded from the remembered position at
+    /// startup, updated whenever the capsule is dragged, and read back from
+    /// the viewport on the first frame if nothing was remembered: that is the
+    /// only way to learn where the window manager actually put the window.
+    centre: Option<crate::window_position::Centre>,
+    /// Whether the capsule was being dragged last frame. Read at the top of
+    /// `update`, before this frame's response exists, so a fast drag that
+    /// carries the pointer outside the window for a frame does not shrink the
+    /// capsule out from under the user mid-drag.
+    dragging: bool,
 }
 
 impl LocalFlowApp {
@@ -152,6 +185,8 @@ impl LocalFlowApp {
         let audio_dir = data_dir.join("cache").join("audio");
         sweep_audio_cache(&audio_dir);
         start_pipeline_worker(work_rx, result_tx, audio_dir, cc.egui_ctx.clone());
+        let capsule_size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
+        let centre = crate::window_position::load(&data_dir, capsule_size);
         Self {
             state,
             microphone,
@@ -162,6 +197,8 @@ impl LocalFlowApp {
             recording_started: None,
             target_pid: None,
             data_dir,
+            centre,
+            dragging: false,
         }
     }
 
@@ -326,19 +363,72 @@ impl eframe::App for LocalFlowApp {
             ctx.request_repaint_after(PROCESSING_ANNOUNCE_DELAY);
         }
 
+        // Where the capsule has never been moved and nothing was remembered,
+        // there is nothing to place it from until the window manager has put
+        // it somewhere. That position only exists once the viewport has been
+        // shown, so it is read back here, on the first frame it is available,
+        // rather than guessed at construction.
+        if self.centre.is_none() {
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                self.centre =
+                    Some(crate::window_position::Centre { x: rect.center().x, y: rect.center().y });
+            }
+        }
+
+        // Minimal mode has to know where the pointer is even when it is
+        // outside the window, which egui cannot report: it measures relative
+        // to the window, and a window that resizes under the cursor perturbs
+        // the very number deciding whether it should resize.
+        let minimal = self.state.settings.minimal_mode;
+        let (pointing, opacity) = if minimal {
+            let (px, py) = crate::platform::pointer_in_window_space();
+            let rect = ctx.input(|i| i.viewport().outer_rect);
+            let pointing = rect.is_some_and(|rect| {
+                rect.contains(egui::pos2(px as f32, py as f32))
+            }) || self.dragging;
+            let distance = self
+                .centre
+                .map(|centre| {
+                    egui::pos2(centre.x, centre.y).distance(egui::pos2(px as f32, py as f32))
+                })
+                .unwrap_or(0.0);
+            (pointing, bead_opacity(distance))
+        } else {
+            (false, 1.0)
+        };
+        let size = ui::capsule::size_for(minimal, pointing, self.state.hud != HudState::Idle);
+        if minimal {
+            // Polling the pointer means an idle LocalFlow in minimal mode
+            // wakes ten times a second rather than sleeping until an event.
+            // That is the price of the proximity fade, and it is paid only
+            // while minimal mode is on, which is not the default.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        // Animated rather than snapped, so the capsule grows and shrinks
+        // instead of jumping between its three sizes.
+        let target = size.points();
+        let width = ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, 0.14);
+        let height = ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, 0.14);
+        if let Some(centre) = self.centre {
+            let (x, y) = crate::window_position::place(
+                centre,
+                (width, height),
+                &crate::platform::work_areas(),
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
         let mut raise_console = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                let response = ui::capsule::show(
-                    ui,
-                    &self.state,
-                    ui.input(|i| i.time),
-                    ui::capsule::CapsuleSize::Full,
-                    1.0,
-                );
+                let response =
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), size, opacity);
+                self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {
                         ui::capsule::CapsuleAction::ToggleConsole => {
@@ -356,14 +446,12 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
-                            let size = ui::theme::CAPSULE_SIZE;
-                            crate::window_position::save(
-                                &self.data_dir,
-                                crate::window_position::Centre {
-                                    x: position.x + size.x / 2.0,
-                                    y: position.y + size.y / 2.0,
-                                },
-                            );
+                            let centre = crate::window_position::Centre {
+                                x: position.x + width / 2.0,
+                                y: position.y + height / 2.0,
+                            };
+                            self.centre = Some(centre);
+                            crate::window_position::save(&self.data_dir, centre);
                         }
                         ui::capsule::CapsuleAction::Quit => {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close)
@@ -617,5 +705,37 @@ mod tests {
         // a failure worth reporting.
         std::fs::remove_dir_all(&dir).unwrap();
         sweep_audio_cache(&dir);
+    }
+
+    /// The bead fades as the pointer moves away, and stops fading at a floor.
+    /// It must never reach zero: LocalFlow has no Dock icon and no menu bar
+    /// item, so a bead that can become invisible is an application with no
+    /// way back, which is the same failure as a capsule restored off screen.
+    #[test]
+    fn the_bead_fades_with_distance_but_never_disappears() {
+        assert_eq!(bead_opacity(0.0), 1.0);
+        assert_eq!(bead_opacity(NEAR_RADIUS), 1.0);
+        assert_eq!(bead_opacity(FAR_RADIUS), BEAD_OPACITY_FLOOR);
+        assert_eq!(bead_opacity(10_000.0), BEAD_OPACITY_FLOOR);
+        let middle = bead_opacity((NEAR_RADIUS + FAR_RADIUS) / 2.0);
+        assert!(middle > BEAD_OPACITY_FLOOR && middle < 1.0);
+        // Constant-valued on purpose: the invariant belongs in this test, not
+        // only in the constant's doc comment, so a future edit to the floor
+        // that breaks it fails here rather than silently.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(BEAD_OPACITY_FLOOR > 0.0, "a bead that can vanish cannot be found again");
+        }
+    }
+
+    /// Monotonic, so the bead never brightens as the pointer retreats.
+    #[test]
+    fn the_bead_never_brightens_as_the_pointer_moves_away() {
+        let mut previous = bead_opacity(0.0);
+        for step in 1..=60 {
+            let opacity = bead_opacity(step as f32 * 10.0);
+            assert!(opacity <= previous, "opacity rose at {step}");
+            previous = opacity;
+        }
     }
 }
