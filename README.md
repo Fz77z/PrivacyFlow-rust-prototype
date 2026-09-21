@@ -61,6 +61,23 @@ Installing to a fixed location matters more than it looks.
 macOS grants Accessibility, Input Monitoring and Microphone permission per executable, so a binary that moves is treated as a different application and has to be granted them again.
 Installing to a stable path is what gives the app a stable identity to grant those permissions to.
 
+The signature matters for the same reason.
+`scripts/build-app.sh` signs with a self-signed identity created once by `scripts/make-signing-cert.sh`, because an ad-hoc signature carries no identity at all and macOS then falls back to identifying the app by a hash of its binary.
+Every rebuild changes that hash, so every rebuild looked like a different application with none of the previous one's permissions.
+The certificate has nothing to do with trust or distribution; it exists so successive builds present the same identity to this machine.
+
+### Input Monitoring has to be added by hand
+
+LocalFlow will not prompt for it.
+The hotkey uses a listen-only event tap, and macOS does not reliably raise a permission prompt for those.
+It simply delivers a reduced event stream instead, which looks exactly like the hotkey working only while LocalFlow is the focused application.
+
+Add it manually in System Settings, Privacy and Security, Input Monitoring, using the plus button to select `/Applications/LocalFlow.app`.
+Then quit and relaunch LocalFlow, because the tap is created at startup and does not pick up a grant made while it is running.
+
+Do not run `tccutil reset ListenEvent com.privacy.dictation` expecting a fresh prompt.
+It removes the entry and nothing re-creates it, which leaves the app quietly unable to see the hotkey.
+
 The app has no Dock icon by design.
 It is a floating widget, so it is quit from the capsule's right-click menu or from the console window.
 
