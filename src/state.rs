@@ -220,6 +220,21 @@ impl AppState {
         self.processing_since = Some(Instant::now());
     }
 
+    /// What the capsule calls the work it is waiting on.
+    ///
+    /// A capture pressed before the models have loaded is queued behind them,
+    /// because the pipeline thread cannot take work until the worker exists.
+    /// Calling that "Transcribing" claimed the one thing that was certainly
+    /// not happening, and turned a ten second startup into what looked like a
+    /// hang. Derived from the worker rather than latched, so it becomes true
+    /// again the moment the worker reports in.
+    pub fn processing_label(&self) -> &'static str {
+        match self.worker {
+            WorkerStatus::Starting => "Loading models",
+            _ => "Transcribing",
+        }
+    }
+
     /// Say "Transcribing" once the wait has lasted long enough to be worth
     /// mentioning. A wait that has already been answered is not promoted:
     /// there is something real on the capsule by then.
@@ -446,6 +461,22 @@ mod tests {
         let mut state = AppState { console_open: true, ..Default::default() };
         state.record_failure(Failure::dropped("Transcription failed", "worker died"));
         assert!(!state.unread_failure);
+    }
+
+    /// A capture pressed in the first seconds after launch is queued behind
+    /// the model load, which takes about ten seconds. The capsule announced
+    /// that as "Transcribing", so the one slow path left in the app claimed to
+    /// be doing the one thing it could not yet do, and read as a hang.
+    #[test]
+    fn work_queued_before_the_models_load_does_not_claim_to_be_transcribing() {
+        let mut state = AppState::default();
+        assert_eq!(state.worker, WorkerStatus::Starting);
+        assert_eq!(state.processing_label(), "Loading models");
+
+        // Derived rather than latched, so it corrects itself the moment the
+        // worker reports in, without anything having to remember to fix it.
+        state.worker = WorkerStatus::Ready;
+        assert_eq!(state.processing_label(), "Transcribing");
     }
 
     /// The capsule used to announce Transcribing the instant the key came up.

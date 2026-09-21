@@ -69,7 +69,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
             let (label, color) = match state.hud {
                 HudState::Idle => ("Ready", theme::MUTED),
                 HudState::Listening => ("Listening", theme::LABEL),
-                HudState::Processing => ("Transcribing", theme::LABEL),
+                HudState::Processing => (state.processing_label(), theme::LABEL),
                 HudState::Done => ("Inserted", theme::LABEL),
                 HudState::Copied => ("Copied", theme::LABEL),
                 // Muted, like Ready: nothing was said, so nothing happened,
