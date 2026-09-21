@@ -4,31 +4,27 @@ use egui::{Color32, FontFamily, FontId, Vec2};
 /// none of them carries a radius: the radius is half the painted height at
 /// every point of the animation between them, and a stored radius would be a
 /// second thing that has to agree with the first.
-pub const CAPSULE_SIZE: Vec2 = Vec2::new(240.0, 56.0);
+pub const CAPSULE_SIZE: Vec2 = Vec2::new(216.0, 56.0);
 pub const PAD_LEFT: f32 = 17.0;
 pub const PAD_RIGHT: f32 = 10.0;
-/// The mark, at one size in every state. Keeping it constant is what makes
-/// the bars look like the same object throughout: a mark that scales with
-/// the capsule reads as a different widget at each size, and the bar width
-/// and hollow stroke are both fractions of this box, so a constant box keeps
-/// them at the values they were designed at.
+/// The mark at full size. Every smaller capsule scales this by its own
+/// height, so the mark keeps its proportions and its position within the
+/// shape at every point of the animation. The bar width and the hollow
+/// stroke are fractions of this box, so they scale with it too.
 pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
 /// The bead: the capsule at rest in minimal mode.
 ///
-/// Sized around the mark rather than the other way round. The mark is the
-/// same size in every state, so the bars never change dimensions as the
-/// capsule grows, and the bead has to be big enough to hold it. Too narrow
-/// for the label, which is the only thing that distinguishes it from the
-/// dictating size.
-pub const BEAD_SIZE: Vec2 = Vec2::new(52.0, 40.0);
-/// The dictating size. A step up from the bead rather than a different
-/// object: four points taller and not quite twice as wide, so beginning to
-/// speak reads as the capsule opening up rather than as a new thing arriving.
-/// It holds the same mark at the same size; only the shape around it grows.
-pub const ACTIVE_SIZE: Vec2 = Vec2::new(96.0, 44.0);
+/// Exactly half the dictating size in both axes, so growing from one to the
+/// other is a pure scale. Anything else changes the widget's proportions
+/// mid-animation, which reads as the shape deforming rather than as one
+/// object getting bigger.
+pub const BEAD_SIZE: Vec2 = Vec2::new(56.0, 28.0);
+/// The dictating size. The bead at twice the scale, same shape, so beginning
+/// to speak reads as the capsule growing rather than as a new thing arriving.
+pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 
 /// The window itself, which never changes size.
 ///

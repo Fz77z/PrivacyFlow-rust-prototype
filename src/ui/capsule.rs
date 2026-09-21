@@ -207,9 +207,9 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 /// Where the mark goes, for a capsule painted at any size between the three.
 ///
-/// The mark itself never changes size. Only its position moves: centred while
-/// the capsule is too narrow for a label, sliding to the left as the capsule
-/// opens and the label makes room for itself. That slide is continuous,
+/// The mark scales with the capsule's height and slides from centred to the
+/// left as the capsule opens and the label makes room for itself. Both are
+/// continuous,
 /// because the capsule is animated and anything that changes in one step
 /// during that animation reads as a snap, which is exactly what an earlier
 /// arrangement-swapping version did.
@@ -223,10 +223,14 @@ fn mark_rect_for(rect: Rect) -> Rect {
     // built around this mark, but a geometry function that is only correct
     // for the inputs it happens to be given is a trap for whoever changes the
     // animation next.
+    // The mark scales with the capsule's height, so the widget keeps its
+    // proportions at every point of the animation rather than holding a
+    // fixed mark inside a changing shell.
+    let scale = rect.height() / theme::CAPSULE_SIZE.y;
     let room = rect.shrink(MARK_INSET);
     let size = Vec2::new(
-        theme::MARK_SIZE.x.min(room.width()),
-        theme::MARK_SIZE.y.min(room.height()),
+        (theme::MARK_SIZE.x * scale).min(room.width()),
+        (theme::MARK_SIZE.y * scale).min(room.height()),
     );
     let centre_x = lerp(
         rect.center().x,
@@ -527,6 +531,24 @@ mod tests {
         assert_eq!(mark.size(), theme::MARK_SIZE);
     }
 
+    /// The label lives between the mark and the cog, and narrowing the
+    /// capsule squeezes it from both sides without anything complaining. The
+    /// longest string it has to hold is "Loading models", which the worker
+    /// shows for the ten or so seconds the models take to load.
+    #[test]
+    fn the_full_capsule_leaves_room_for_its_longest_label() {
+        let capsule = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::CAPSULE_SIZE);
+        let mark = mark_rect_for(capsule);
+        let icon_left =
+            capsule.right() - theme::PAD_RIGHT - theme::ICON_SIZE;
+        let room = icon_left - (mark.right() + theme::MARK_GAP);
+        assert!(
+            room >= 100.0,
+            "only {room} points for the label, which is not enough for \
+             \"Loading models\" at the label font"
+        );
+    }
+
     /// At rest it is centred, which is what makes the bead look like a bead
     /// rather than like a capsule with its contents pushed to one side.
     #[test]
@@ -536,9 +558,8 @@ mod tests {
         assert_eq!(mark.center().x, bead.center().x);
         assert_eq!(
             mark.size(),
-            theme::MARK_SIZE,
-            "the bars are the same size in every state, which is what makes them \
-             read as one object rather than as a different widget per size"
+            theme::MARK_SIZE * (theme::BEAD_SIZE.y / theme::CAPSULE_SIZE.y),
+            "the mark scales with the capsule, so the widget keeps its proportions"
         );
     }
 
