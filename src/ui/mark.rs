@@ -6,10 +6,10 @@ use egui::{Color32, Painter, Pos2, Rect, Rounding, Stroke, Vec2};
 /// fractions of the mark box, so every state paints the same silhouette and
 /// only colour and fill distinguish them.
 const BARS: [(f32, f32); 4] = [(0.00, 0.27), (0.26, 0.67), (0.52, 0.37), (0.78, 0.57)];
-/// Bar width as a fraction of the mark box. A fixed width would leave the
-/// bars looking clubbed when the mark is painted into the dictating capsule,
-/// which is less than half as wide. 4 points in the 36 point box this was
-/// designed against.
+/// Bar width as a fraction of the mark box. Keeps the bars proportional when
+/// a caller scales the box down uniformly; it is the caller's job to keep the
+/// box roughly proportional to the 36 point box this was designed against, so
+/// the silhouette this fraction produces stays the intended shape.
 const BAR_WIDTH_FRACTION: f32 = 4.0 / 36.0;
 
 /// How a bar is drawn. Filled bars read as live, hollow bars as unlit - the
@@ -27,9 +27,25 @@ pub struct Appearance {
 
 /// Paints the mark. `level` is the current microphone level and `time` drives
 /// the shimmer; both only ever change bar heights inside `rect`, never the
-/// box itself.
-pub fn paint(painter: &Painter, rect: Rect, appearance: &Appearance, level: f32, time: f64) {
+/// box itself. `opacity` fades every colour the mark paints, so a caller
+/// fading the whole capsule does not leave the mark behind at full strength.
+pub fn paint(
+    painter: &Painter,
+    rect: Rect,
+    appearance: &Appearance,
+    level: f32,
+    time: f64,
+    opacity: f32,
+) {
+    // Everything below reads through this rather than threading opacity into
+    // each colour by hand.
+    let fade = |color: Color32| color.gamma_multiply(opacity);
     let bar_width = rect.width() * BAR_WIDTH_FRACTION;
+    // Bars scale with the box, and so does the stroke that draws a hollow
+    // one: at the dictating size's narrower bars, a fixed 1.4pt stroke would
+    // leave no hollow interior, and hollow-versus-filled is the only state
+    // distinction the mark carries at that size.
+    let hollow_stroke = 1.4 * rect.width() / 36.0;
     let bars = bars_for(appearance);
     for (index, (x, resting)) in BARS.iter().enumerate() {
         let height = rect.height() * animated_height(appearance, index, *resting, level, time);
@@ -39,24 +55,28 @@ pub fn paint(painter: &Painter, rect: Rect, appearance: &Appearance, level: f32,
             Vec2::new(bar_width, height),
         );
         match bars[index] {
-            Bar::Filled(color) => painter.rect_filled(bar, Rounding::same(bar_width / 2.0), color),
+            Bar::Filled(color) => {
+                painter.rect_filled(bar, Rounding::same(bar_width / 2.0), fade(color))
+            }
             Bar::Hollow(color) => painter.rect_stroke(
                 bar,
                 Rounding::same(bar_width / 2.0),
-                Stroke::new(1.4, color),
+                Stroke::new(hollow_stroke, fade(color)),
             ),
         };
     }
     if appearance.failure == Some(FailureKind::InputUnavailable) {
         // The one mark that adds a stroke rather than recolouring. It never
         // displaces a bar; it crosses them, which is how a muted input reads
-        // everywhere else on the system.
+        // everywhere else on the system. The inset scales with the box for
+        // the same reason the stroke width does.
+        let inset = 2.0 * rect.width() / 36.0;
         painter.line_segment(
             [
-                Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0),
-                Pos2::new(rect.right() - 2.0, rect.top() + 2.0),
+                Pos2::new(rect.left() + inset, rect.bottom() - inset),
+                Pos2::new(rect.right() - inset, rect.top() + inset),
             ],
-            Stroke::new(2.4 * rect.width() / 36.0, theme::ERROR),
+            Stroke::new(2.4 * rect.width() / 36.0, fade(theme::ERROR)),
         );
     }
 }

@@ -75,6 +75,13 @@ pub struct CapsuleResponse {
     pub dragging: bool,
 }
 
+/// The failure to show right now, if any. A failure is only shown while the
+/// capsule is actually in the error state; once the hud moves on, the icon's
+/// unread dot is what carries the failure forward, not this.
+fn failure_for(state: &AppState) -> Option<&Failure> {
+    state.last_failure.as_ref().filter(|_| state.hud == HudState::Error)
+}
+
 /// The one point border colour for the current state. Shared by the full
 /// capsule's shell and the bead, so the two never drift apart on what each
 /// state means.
@@ -100,8 +107,20 @@ pub fn show(
 ) -> CapsuleResponse {
     let rect = Rect::from_min_size(ui.max_rect().min, size.points());
     let painter = ui.painter_at(rect);
-    let failure = state.last_failure.as_ref().filter(|_| state.hud == HudState::Error);
-    let border = border_for(state, failure.is_some());
+    let failure = failure_for(state);
+    // An unread failure keeps the bead tinted after the dictating capsule has
+    // retired. Without that, a failure raised while the user was typing
+    // elsewhere would have nowhere to show: the bead has no console icon, and
+    // so nowhere to put the unread dot. Chosen here, before the one shell
+    // paint, rather than in a second paint over the shell: two FILL paints at
+    // less than full opacity would composite to a visibly more opaque bead
+    // than the fade asks for, and the bead's tint would blend with the
+    // ordinary border underneath it instead of replacing it.
+    let border = if size == CapsuleSize::Bead && state.unread_failure {
+        theme::ERROR
+    } else {
+        border_for(state, failure.is_some())
+    };
     // Everything is painted through this, so the proximity fade is one
     // multiplication rather than an alpha threaded through every call.
     let fade = |color: Color32| color.gamma_multiply(opacity);
@@ -119,9 +138,10 @@ pub fn show(
     let mut action = settled.map(CapsuleAction::Moved);
 
     match size {
-        CapsuleSize::Bead => paint_bead(&painter, rect, state, border, opacity),
-        CapsuleSize::Active => paint_active(&painter, rect, state, failure, time),
-        CapsuleSize::Full => paint_full(ui, &painter, rect, state, failure, time, &mut action),
+        // The shell above is the whole bead; there is nothing left to paint.
+        CapsuleSize::Bead => {}
+        CapsuleSize::Active => paint_active(&painter, rect, state, time, opacity),
+        CapsuleSize::Full => paint_full(ui, &painter, rect, state, time, opacity, &mut action),
     }
 
     body.context_menu(|ui| menu(ui, &mut action));
@@ -136,10 +156,12 @@ fn paint_full(
     painter: &egui::Painter,
     rect: Rect,
     state: &AppState,
-    failure: Option<&Failure>,
     time: f64,
+    opacity: f32,
     action: &mut Option<CapsuleAction>,
 ) {
+    let failure = failure_for(state);
+    let fade = |color: Color32| color.gamma_multiply(opacity);
     let mark_rect = Rect::from_min_size(
         Pos2::new(rect.left() + theme::PAD_LEFT, rect.center().y - theme::MARK_SIZE.y / 2.0),
         theme::MARK_SIZE,
@@ -150,6 +172,7 @@ fn paint_full(
         &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
         state.mic_level,
         time,
+        opacity,
     );
 
     let icon_rect = Rect::from_center_size(
@@ -164,7 +187,7 @@ fn paint_full(
             Align2::LEFT_CENTER,
             failure.headline,
             theme::error_font(),
-            theme::ERROR_TEXT,
+            fade(theme::ERROR_TEXT),
         ),
         None => {
             let (label, color) = match state.hud {
@@ -183,7 +206,7 @@ fn paint_full(
                 Align2::LEFT_CENTER,
                 label,
                 theme::label_font(),
-                color,
+                fade(color),
             )
         }
     };
@@ -200,7 +223,7 @@ fn paint_full(
         painter.rect_filled(
             icon_rect,
             Rounding::same(theme::ICON_RADIUS),
-            theme::ICON_HOVER,
+            fade(theme::ICON_HOVER),
         );
     }
     let tint = if failure.is_some() || state.unread_failure {
@@ -208,13 +231,13 @@ fn paint_full(
     } else {
         theme::ICON_TINT
     };
-    paint_console_glyph(painter, icon_rect, tint);
+    paint_console_glyph(painter, icon_rect, fade(tint));
     if state.unread_failure {
         // Survives the capsule returning to Ready, so a failure that happened
         // while the user was typing elsewhere is still there to be found.
         let dot = Pos2::new(icon_rect.right() - 8.0, icon_rect.top() + 8.0);
-        painter.circle_filled(dot, 4.5, theme::FILL);
-        painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
+        painter.circle_filled(dot, 4.5, fade(theme::FILL));
+        painter.circle_filled(dot, 3.5, fade(theme::UNREAD_DOT));
     }
 
     if icon.clicked() {
@@ -230,47 +253,24 @@ fn paint_full(
 /// label, and the mark is the part that has to stay legible while someone is
 /// actually speaking.
 ///
-/// The dictating capsule is never faded, because it only exists while the
-/// user is dictating, so there is no opacity parameter to be dropped rather
-/// than kept as a lie.
-fn paint_active(
-    painter: &egui::Painter,
-    rect: Rect,
-    state: &AppState,
-    failure: Option<&Failure>,
-    time: f64,
-) {
-    let mark_rect = Rect::from_center_size(rect.center(), Vec2::new(44.0, 16.0));
+/// The mark box is 22 by 18, not a uniform scale of the 36 by 30 box the mark
+/// was designed against: a uniform scale that fits the 28pt capsule height
+/// would also widen the bars past what the height leaves room for. Bar width
+/// against the tallest bar's height is about 5:1 at 36x30 and about 4.9:1 at
+/// 22x18, which keeps the silhouette; 22 is close to the largest width a
+/// uniform scale of the 28pt capsule height allows, leaving 5pt above and
+/// below, and the last bar's right edge lands at 19.60 inside 22.0, so
+/// nothing clips.
+fn paint_active(painter: &egui::Painter, rect: Rect, state: &AppState, time: f64, opacity: f32) {
+    let failure = failure_for(state);
+    let mark_rect = Rect::from_center_size(rect.center(), Vec2::new(22.0, 18.0));
     mark::paint(
         painter,
         mark_rect,
         &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
         state.mic_level,
         time,
-    );
-}
-
-/// The bead. Too small for the mark or the label, so state is carried by
-/// colour alone. That is a knowing trade: the three failure kinds are
-/// indistinguishable at this size, and the detail is a point away.
-///
-/// An unread failure keeps the bead tinted after the dictating capsule has
-/// retired. Without that, a failure raised while the user was typing
-/// elsewhere would have nowhere to show: the bead has no console icon, and so
-/// nowhere to put the unread dot.
-fn paint_bead(
-    painter: &egui::Painter,
-    rect: Rect,
-    state: &AppState,
-    border: Color32,
-    opacity: f32,
-) {
-    let colour = if state.unread_failure { theme::ERROR } else { border };
-    painter.rect(
-        rect.shrink(0.5),
-        Rounding::same(theme::BEAD_RADIUS),
-        theme::FILL.gamma_multiply(opacity),
-        Stroke::new(1.0, colour.gamma_multiply(opacity)),
+        opacity,
     );
 }
 
