@@ -30,7 +30,8 @@ fn main() -> eframe::Result<()> {
     // show the capsule in one place and then jump it to another.
     // The size is passed in rather than assumed, because the check is about
     // how much of this capsule lands on a display.
-    let remembered = window_position::load(&data_dir, (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y));
+    let size = (ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y);
+    let remembered = window_position::load(&data_dir, size);
     let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
             .with_min_inner_size([ui::theme::CAPSULE_SIZE.x, ui::theme::CAPSULE_SIZE.y])
@@ -40,8 +41,9 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_title("LocalFlow");
-    if let Some(position) = remembered {
-        viewport = viewport.with_position([position.x, position.y]);
+    if let Some(centre) = remembered {
+        let (x, y) = window_position::place(centre, size, &platform::work_areas());
+        viewport = viewport.with_position([x, y]);
     }
     let options = eframe::NativeOptions {
         viewport,

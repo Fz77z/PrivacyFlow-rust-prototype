@@ -336,11 +336,12 @@ impl eframe::App for LocalFlowApp {
                             raise_console = true;
                         }
                         ui::capsule::CapsuleAction::Moved(position) => {
+                            let size = ui::theme::CAPSULE_SIZE;
                             crate::window_position::save(
                                 &self.data_dir,
-                                crate::window_position::WindowPosition {
-                                    x: position.x,
-                                    y: position.y,
+                                crate::window_position::Centre {
+                                    x: position.x + size.x / 2.0,
+                                    y: position.y + size.y / 2.0,
                                 },
                             );
                         }
