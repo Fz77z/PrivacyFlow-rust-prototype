@@ -7,6 +7,10 @@ pub enum CapsuleAction {
     ToggleConsole,
     OpenConsole,
     Quit,
+    /// The capsule was dragged and let go here. Emitted on release rather
+    /// than continuously, so settling it in a new place costs one write
+    /// instead of one per frame.
+    Moved(Pos2),
 }
 
 /// Draws the whole widget. The capsule is the window, so this paints every
@@ -50,7 +54,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
     // The body is everything the icon does not claim, so dragging the widget
     // works anywhere the user naturally grabs it.
     let body = ui.interact(rect, ui.id().with("capsule"), Sense::click_and_drag());
-    drag_window(ui, &body);
+    let settled = drag_window(ui, &body);
 
     let text_left = mark_rect.right() + theme::MARK_GAP;
     match failure {
@@ -109,7 +113,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
     }
 
-    let mut action = None;
+    let mut action = settled.map(CapsuleAction::Moved);
     if icon.clicked() {
         action = Some(CapsuleAction::ToggleConsole);
     }
@@ -135,8 +139,15 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
 /// perturbing, which shows up as jitter and lag. The screen position owes
 /// nothing to any window, so the arithmetic is absolute and the capsule sits
 /// exactly where it was grabbed.
-fn drag_window(ui: &Ui, body: &egui::Response) {
+fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
     let anchor_id = ui.id().with("drag_anchor");
+    if body.dragged() || body.drag_started() {
+        // A drag is driven by pointer movement, and egui otherwise only wakes
+        // for events. Asking for the next frame keeps the capsule tracking at
+        // the display's rate rather than in steps.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx().request_repaint();
+    }
     if body.drag_started() {
         let window = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
         if let Some(window) = window {
@@ -144,28 +155,39 @@ fn drag_window(ui: &Ui, body: &egui::Response) {
             ui.ctx().memory_mut(|memory| {
                 memory
                     .data
-                    .insert_temp(anchor_id, DragAnchor { window, pointer_x, pointer_y })
+                    .insert_temp(
+                        anchor_id,
+                        DragAnchor { window, pointer_x, pointer_y, settled: window },
+                    )
             });
         }
     }
-    if !body.dragged() {
-        return;
-    }
-    let Some(anchor) = ui
+    let anchor = ui
         .ctx()
-        .memory_mut(|memory| memory.data.get_temp::<DragAnchor>(anchor_id))
-    else {
-        return;
-    };
+        .memory_mut(|memory| memory.data.get_temp::<DragAnchor>(anchor_id));
+    let anchor = anchor?;
+    if body.drag_stopped() {
+        return Some(anchor.settled);
+    }
+    if !body.dragged() {
+        return None;
+    }
     let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
     // Cocoa measures upwards from the bottom of the screen and egui measures
     // downwards from the top, so the vertical movement is inverted.
+    // Rounded to whole points. A window placed on a fraction of a point is
+    // resampled by the compositor, which softens the capsule's edge and its
+    // one point border while it moves.
     let moved = Pos2::new(
-        anchor.window.x + (pointer_x - anchor.pointer_x) as f32,
-        anchor.window.y - (pointer_y - anchor.pointer_y) as f32,
+        (anchor.window.x + (pointer_x - anchor.pointer_x) as f32).round(),
+        (anchor.window.y - (pointer_y - anchor.pointer_y) as f32).round(),
     );
+    ui.ctx().memory_mut(|memory| {
+        memory.data.insert_temp(anchor_id, DragAnchor { settled: moved, ..anchor })
+    });
     ui.ctx()
         .send_viewport_cmd(egui::ViewportCommand::OuterPosition(moved));
+    None
 }
 
 /// Where the window was, and where the pointer was, at the moment the drag
@@ -176,6 +198,9 @@ struct DragAnchor {
     window: Pos2,
     pointer_x: f64,
     pointer_y: f64,
+    /// Where the capsule was last put, carried so the release can report it
+    /// without reading back a window rectangle that lags behind.
+    settled: Pos2,
 }
 
 fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {

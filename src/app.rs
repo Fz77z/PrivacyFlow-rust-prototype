@@ -303,6 +303,15 @@ impl eframe::App for LocalFlowApp {
                             self.state.open_console();
                             raise_console = true;
                         }
+                        ui::capsule::CapsuleAction::Moved(position) => {
+                            crate::window_position::save(
+                                &self.data_dir,
+                                crate::window_position::WindowPosition {
+                                    x: position.x,
+                                    y: position.y,
+                                },
+                            );
+                        }
                         ui::capsule::CapsuleAction::Quit => {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close)
                         }

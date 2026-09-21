@@ -5,6 +5,7 @@ mod platform;
 mod router;
 mod state;
 mod ui;
+mod window_position;
 
 fn main() -> eframe::Result<()> {
     let Some(data_root) = dirs::data_local_dir() else {
@@ -24,8 +25,10 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    // Restored before the window exists, because moving it afterwards would
+    // show the capsule in one place and then jump it to another.
+    let remembered = window_position::load(&data_dir);
+    let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([240.0, 56.0])
             .with_min_inner_size([240.0, 56.0])
             .with_max_inner_size([240.0, 56.0])
@@ -33,7 +36,12 @@ fn main() -> eframe::Result<()> {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
-            .with_title("LocalFlow"),
+            .with_title("LocalFlow");
+    if let Some(position) = remembered {
+        viewport = viewport.with_position([position.x, position.y]);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
