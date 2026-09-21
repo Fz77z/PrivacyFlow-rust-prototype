@@ -13,6 +13,13 @@ use std::time::{Duration, Instant};
 
 const MAX_RECORDING_DURATION: Duration = Duration::from_secs(120);
 
+/// How long a dictation must be in the pipeline before the capsule says so.
+/// Long enough that an answer arriving almost immediately, which is what a
+/// capture with no speech in it does, replaces the listening state directly
+/// instead of flashing Transcribing on the way past. Short enough that a real
+/// dictation, which takes about a second, still reads as instant feedback.
+const PROCESSING_ANNOUNCE_DELAY: Duration = Duration::from_millis(120);
+
 struct WorkItem {
     captured: CapturedAudio,
     speech_finished: Instant,
@@ -184,7 +191,7 @@ impl LocalFlowApp {
         let Some(microphone) = &self.microphone else {
             return;
         };
-        self.state.hud = HudState::Processing;
+        self.state.begin_processing();
         let speech_finished = Instant::now();
         // Only the microphone stream is stopped here. Draining the capture
         // buffer and encoding the WAV happen on the pipeline thread, so
@@ -238,14 +245,7 @@ impl LocalFlowApp {
             // the user's side: the words exist and are on the pasteboard. It
             // is reported as its own state rather than as either a clean
             // insert or a failure, because it is neither.
-            Outcome::Inserted(insertion) => {
-                self.state.hud = match insertion {
-                    Insertion::Pasted => HudState::Done,
-                    Insertion::CopiedOnly => HudState::Copied,
-                };
-                self.state.push_history(None, Some(insertion));
-                self.state.done_at = Some(Instant::now());
-            }
+            Outcome::Inserted(insertion) => self.state.record_inserted(insertion),
         }
     }
 
@@ -271,6 +271,7 @@ impl eframe::App for LocalFlowApp {
             }
         }
         self.receive_results();
+        self.state.announce_processing(PROCESSING_ANNOUNCE_DELAY);
         if self
             .recording_started
             .is_some_and(|started| started.elapsed() >= MAX_RECORDING_DURATION)
@@ -305,6 +306,11 @@ impl eframe::App for LocalFlowApp {
         }
         if self.state.hud == HudState::Processing {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        // Nothing else will wake the UI in time to make the announcement,
+        // because the pipeline only repaints when it has an answer.
+        if self.state.processing_since.is_some() {
+            ctx.request_repaint_after(PROCESSING_ANNOUNCE_DELAY);
         }
 
         // A console buried behind other windows is exactly when someone

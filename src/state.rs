@@ -1,5 +1,5 @@
 use crate::platform::Insertion;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What the capsule is showing, which is also the app's single answer to
 /// "where is this dictation up to?". Listening and Processing are the two
@@ -153,6 +153,10 @@ pub struct AppState {
     /// a window does not change afterwards, so this does not need re-asking
     /// the way a permission does.
     pub capsule_non_activating: bool,
+    /// When the capture was handed to the pipeline, while the capsule is
+    /// still showing the state before it. The mirror of `done_at`: that one
+    /// retires a state after a delay, this one promotes one.
+    pub processing_since: Option<Instant>,
     /// When the capsule last settled on a finished or failed dictation. The
     /// capsule returns to Ready 1.4s later, so the timer belongs with the
     /// result it describes.
@@ -177,6 +181,7 @@ impl Default for AppState {
             hotkey_installed: false,
             microphone_available: false,
             capsule_non_activating: false,
+            processing_since: None,
             done_at: None,
         }
     }
@@ -191,6 +196,7 @@ impl AppState {
         self.mic_level = 0.0;
         self.clear_result();
         self.last_failure = None;
+        self.processing_since = None;
         self.done_at = None;
     }
 
@@ -201,6 +207,41 @@ impl AppState {
         self.route = None;
         self.output.clear();
         self.timings = Timings::default();
+    }
+
+    /// The capture is on its way to the worker.
+    ///
+    /// The capsule deliberately does not change yet. Most dictations take
+    /// about a second and deserve to say what they are doing, but a capture
+    /// with no speech in it is refused before transcription starts and its
+    /// answer arrives within a frame or two. Announcing the work first made
+    /// the capsule flash a state it was never meaningfully in.
+    pub fn begin_processing(&mut self) {
+        self.processing_since = Some(Instant::now());
+    }
+
+    /// Say "Transcribing" once the wait has lasted long enough to be worth
+    /// mentioning. A wait that has already been answered is not promoted:
+    /// there is something real on the capsule by then.
+    pub fn announce_processing(&mut self, delay: Duration) {
+        let Some(since) = self.processing_since else {
+            return;
+        };
+        if since.elapsed() >= delay {
+            self.hud = HudState::Processing;
+            self.processing_since = None;
+        }
+    }
+
+    /// Files a dictation that reached the cursor, in whichever of the two
+    /// ways it landed.
+    pub fn record_inserted(&mut self, insertion: Insertion) {
+        self.hud = match insertion {
+            Insertion::Pasted => HudState::Done,
+            Insertion::CopiedOnly => HudState::Copied,
+        };
+        self.push_history(None, Some(insertion));
+        self.settle();
     }
 
     /// Files a failure: the capsule shows it, the console keeps it, and the
@@ -219,7 +260,7 @@ impl AppState {
         }
         self.last_failure = Some(failure.clone());
         self.push_history(Some(failure), None);
-        self.done_at = Some(Instant::now());
+        self.settle();
     }
 
     pub fn push_history(&mut self, failure: Option<Failure>, insertion: Option<Insertion>) {
@@ -247,6 +288,14 @@ impl AppState {
     /// for a moment and the dwell timer takes it back to Ready.
     pub fn record_no_speech(&mut self) {
         self.hud = HudState::NoSpeech;
+        self.settle();
+    }
+
+    /// The end of a dictation, however it ended: the dwell timer starts, and
+    /// any pending announcement is abandoned, because there is now something
+    /// real on the capsule that must not be painted over.
+    fn settle(&mut self) {
+        self.processing_since = None;
         self.done_at = Some(Instant::now());
     }
 
@@ -397,6 +446,36 @@ mod tests {
         let mut state = AppState { console_open: true, ..Default::default() };
         state.record_failure(Failure::dropped("Transcription failed", "worker died"));
         assert!(!state.unread_failure);
+    }
+
+    /// The capsule used to announce Transcribing the instant the key came up.
+    /// A capture with no speech in it is refused before transcription starts,
+    /// so its answer lands within a frame or two, and the capsule flashed
+    /// green, blue and grey in the time it takes to blink.
+    #[test]
+    fn an_answer_that_beats_the_delay_never_announces_transcribing() {
+        let mut state = AppState::default();
+        state.reset_for_recording();
+        state.begin_processing();
+
+        state.announce_processing(Duration::from_secs(1));
+        assert_eq!(state.hud, HudState::Listening, "too soon to say anything");
+
+        state.record_no_speech();
+        // The wait is over, so a promotion that arrives late must not paint
+        // Transcribing over the result the user is already reading.
+        state.announce_processing(Duration::ZERO);
+        assert_eq!(state.hud, HudState::NoSpeech);
+    }
+
+    /// A real dictation takes about a second, which is well worth announcing.
+    #[test]
+    fn a_wait_long_enough_to_notice_does_say_transcribing() {
+        let mut state = AppState::default();
+        state.reset_for_recording();
+        state.begin_processing();
+        state.announce_processing(Duration::ZERO);
+        assert_eq!(state.hud, HudState::Processing);
     }
 
     /// Pressing the key and saying nothing is a non-event, not a dictation.
