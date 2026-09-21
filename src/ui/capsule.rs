@@ -129,32 +129,53 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
 /// being written in, the drag is done here instead: egui already reports the
 /// pointer movement, so the position is ours to set.
 ///
-/// The running position is kept rather than re-read each frame, because the
-/// window's reported rectangle lags the commands sent to it and feeding that
-/// back would make the capsule stutter behind the pointer.
+/// The pointer is measured in screen coordinates rather than through egui's
+/// drag delta. egui reports movement relative to the window, so moving the
+/// window changes the next reading: the capsule chases a number it is itself
+/// perturbing, which shows up as jitter and lag. The screen position owes
+/// nothing to any window, so the arithmetic is absolute and the capsule sits
+/// exactly where it was grabbed.
 fn drag_window(ui: &Ui, body: &egui::Response) {
-    let origin_id = ui.id().with("drag_origin");
+    let anchor_id = ui.id().with("drag_anchor");
     if body.drag_started() {
-        let position = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
-        if let Some(position) = position {
-            ui.ctx()
-                .memory_mut(|memory| memory.data.insert_temp(origin_id, position));
+        let window = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
+        if let Some(window) = window {
+            let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
+            ui.ctx().memory_mut(|memory| {
+                memory
+                    .data
+                    .insert_temp(anchor_id, DragAnchor { window, pointer_x, pointer_y })
+            });
         }
     }
     if !body.dragged() {
         return;
     }
-    let Some(position) = ui
+    let Some(anchor) = ui
         .ctx()
-        .memory_mut(|memory| memory.data.get_temp::<Pos2>(origin_id))
+        .memory_mut(|memory| memory.data.get_temp::<DragAnchor>(anchor_id))
     else {
         return;
     };
-    let moved = position + body.drag_delta();
-    ui.ctx()
-        .memory_mut(|memory| memory.data.insert_temp(origin_id, moved));
+    let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
+    // Cocoa measures upwards from the bottom of the screen and egui measures
+    // downwards from the top, so the vertical movement is inverted.
+    let moved = Pos2::new(
+        anchor.window.x + (pointer_x - anchor.pointer_x) as f32,
+        anchor.window.y - (pointer_y - anchor.pointer_y) as f32,
+    );
     ui.ctx()
         .send_viewport_cmd(egui::ViewportCommand::OuterPosition(moved));
+}
+
+/// Where the window was, and where the pointer was, at the moment the drag
+/// began. Everything after that is measured from here rather than
+/// accumulated, so a long drag cannot drift.
+#[derive(Clone, Copy)]
+struct DragAnchor {
+    window: Pos2,
+    pointer_x: f64,
+    pointer_y: f64,
 }
 
 fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {

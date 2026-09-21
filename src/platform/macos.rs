@@ -6,7 +6,7 @@ use core_graphics::event::{
     CGEventType, EventField, KeyCode,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use objc2_app_kit::NSWorkspace;
+use objc2_app_kit::{NSEvent, NSWorkspace};
 use core_foundation::base::TCFType;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -167,6 +167,18 @@ pub enum Insertion {
     /// Left on the pasteboard because the destination was no longer frontmost.
     /// The words survived; they just need a paste.
     CopiedOnly,
+}
+
+/// Where the pointer is on screen, in Cocoa's coordinates: origin at the
+/// bottom left of the main display, y increasing upwards.
+///
+/// Dragging needs a measurement the window cannot affect. egui reports
+/// pointer movement relative to the window, so moving the window changes the
+/// next reading, and the capsule ends up chasing a number it is perturbing,
+/// which reads as jitter. This is independent of every window in the process.
+pub fn pointer_on_screen() -> (f64, f64) {
+    let point = NSEvent::mouseLocation();
+    (point.x, point.y)
 }
 
 /// Return the frontmost application's process ID without activating it.
