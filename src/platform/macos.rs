@@ -190,20 +190,21 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
     clipboard
         .set_text(text)
         .context("Could not set macOS pasteboard")?;
-    let source = CGEventSource::new(CGEventSourceStateID::Private)
+    // CombinedSessionState, not Private. A private source state is documented
+    // as being private to the process that creates it, which is the wrong
+    // thing for an event meant to arrive in somebody else's application: the
+    // paste was reaching the pasteboard and then going nowhere, in every
+    // target app, with Accessibility granted.
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|_| anyhow!("Could not create keyboard event source"))?;
     let down = CGEvent::new_keyboard_event(source.clone(), V_KEYCODE, true)
         .map_err(|_| anyhow!("Could not create paste key-down event"))?;
-    // Delivered straight to the destination process rather than posted to the
-    // session. We already know which process this is, and have just confirmed
-    // it is frontmost, so there is nothing to gain from routing through the
-    // window server and a session-wide post was not arriving.
     down.set_flags(CGEventFlags::CGEventFlagCommand);
-    down.post_to_pid(target_pid);
+    down.post(CGEventTapLocation::Session);
     let up = CGEvent::new_keyboard_event(source, V_KEYCODE, false)
         .map_err(|_| anyhow!("Could not create paste key-up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagCommand);
-    up.post_to_pid(target_pid);
+    up.post(CGEventTapLocation::Session);
     Ok(())
 }
 
