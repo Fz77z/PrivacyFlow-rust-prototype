@@ -29,7 +29,12 @@ extern "C" {
     fn CGEventTapEnable(tap: *mut c_void, enable: bool);
     /// Whether this process may post synthetic keyboard events, which is what
     /// System Settings calls Accessibility.
-    fn AXIsProcessTrusted() -> bool;
+    ///
+    /// Declared as the `Boolean` it actually returns, which is an unsigned
+    /// char, rather than as a Rust `bool`. A `bool` holding any byte other
+    /// than 0 or 1 is undefined behaviour, and nothing in the C contract
+    /// promises the API will only ever produce those two.
+    fn AXIsProcessTrusted() -> u8;
 }
 
 /// Whether macOS will actually deliver the synthetic keystrokes LocalFlow
@@ -40,7 +45,7 @@ extern "C" {
 /// system discards the event silently, so the paste looks like it worked,
 /// the timings look healthy, and nothing arrives at the cursor.
 pub fn can_synthesize_input() -> bool {
-    unsafe { AXIsProcessTrusted() }
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,19 +199,29 @@ pub fn frontmost_application_pid() -> Option<i32> {
 /// busy target application's asynchronous paste handling and insert stale data.
 /// Accessibility permission is required for the synthesized key event.
 pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
-    // Checked before the pasteboard is touched, so a missing permission does
-    // not silently replace the user's clipboard on the way to doing nothing.
-    if !can_synthesize_input() {
-        return Err(anyhow!(
-            "LocalFlow is not allowed to send keystrokes, so the text could not be \
-             pasted. Add LocalFlow to System Settings, Privacy and Security, \
-             Accessibility, then quit and relaunch it."
-        ));
-    }
+    // The pasteboard is written first, before anything that can refuse, so
+    // that every path from here on leaves the user holding their words. An
+    // earlier version checked the permission first and returned without
+    // writing, which meant the one case where the user most needed the
+    // transcript, the case where LocalFlow could not place it for them, was
+    // the case that threw it away.
     let mut clipboard = Clipboard::new().context("Could not access macOS pasteboard")?;
     clipboard
         .set_text(text)
         .context("Could not set macOS pasteboard")?;
+    // Reported as a failure rather than as CopiedOnly, even though the words
+    // survived both ways. CopiedOnly means the destination moved, which is
+    // ordinary and carries no remedy. This is a configuration fault with a
+    // specific fix, and showing it as a quiet success would hide the only
+    // message that says how to repair it.
+    if !can_synthesize_input() {
+        return Err(anyhow!(
+            "LocalFlow is not allowed to send keystrokes, so the text could not be \
+             pasted. It is on your clipboard: press Cmd-V to place it. To fix this \
+             permanently, add LocalFlow to System Settings, Privacy and Security, \
+             Accessibility, then quit and relaunch it."
+        ));
+    }
     // The pasteboard is written before this is checked, so that a dictation
     // whose destination has gone away still leaves the user holding their
     // words. Pasting somewhere the user is no longer looking would put text

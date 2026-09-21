@@ -150,16 +150,24 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
     }
     if body.drag_started() {
         let window = ui.ctx().input(|i| i.viewport().outer_rect.map(|rect| rect.min));
-        if let Some(window) = window {
-            let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
-            ui.ctx().memory_mut(|memory| {
-                memory
-                    .data
-                    .insert_temp(
+        match window {
+            Some(window) => {
+                let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
+                ui.ctx().memory_mut(|memory| {
+                    memory.data.insert_temp(
                         anchor_id,
                         DragAnchor { window, pointer_x, pointer_y, settled: window },
                     )
-            });
+                });
+            }
+            // Without a window rectangle there is nothing to measure from, so
+            // this drag has no anchor. The previous drag's anchor must go with
+            // it: left in place, the next frame would read it and jump the
+            // capsule to a position computed against an origin that has since
+            // moved.
+            None => ui
+                .ctx()
+                .memory_mut(|memory| memory.data.remove::<DragAnchor>(anchor_id)),
         }
     }
     let anchor = ui
@@ -167,6 +175,8 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
         .memory_mut(|memory| memory.data.get_temp::<DragAnchor>(anchor_id));
     let anchor = anchor?;
     if body.drag_stopped() {
+        ui.ctx()
+            .memory_mut(|memory| memory.data.remove::<DragAnchor>(anchor_id));
         return Some(anchor.settled);
     }
     if !body.dragged() {
@@ -175,6 +185,14 @@ fn drag_window(ui: &Ui, body: &egui::Response) -> Option<Pos2> {
     let (pointer_x, pointer_y) = crate::platform::pointer_on_screen();
     // Cocoa measures upwards from the bottom of the screen and egui measures
     // downwards from the top, so the vertical movement is inverted.
+    // Both terms are differences from the anchor, so the shared origin cancels
+    // and this is correct for displays left of or above the main one, and
+    // across a drag between displays of different scale factors.
+    // It does assume egui's zoom factor is 1.0: the anchor is in egui points
+    // and the pointer delta is in raw Cocoa points, so a zoom would track at
+    // the wrong rate. Left as an assumption rather than handled, because
+    // nothing sets zoom and a window that refuses to become key cannot receive
+    // the keyboard shortcut that would change it.
     // Rounded to whole points. A window placed on a fraction of a point is
     // resampled by the compositor, which softens the capsule's edge and its
     // one point border while it moves.
