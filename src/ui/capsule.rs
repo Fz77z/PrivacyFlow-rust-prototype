@@ -20,6 +20,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
         (false, HudState::Listening) => theme::BORDER_LISTENING,
         (false, HudState::Processing) => theme::BORDER_TRANSCRIBING,
         (false, HudState::Done) => theme::BORDER_INSERTED,
+        (false, HudState::Copied) => theme::BORDER_INSERTED,
         _ => theme::BORDER,
     };
     painter.rect(
@@ -68,6 +69,7 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64) -> Option<CapsuleAction> {
                 HudState::Listening => ("Listening", theme::LABEL),
                 HudState::Processing => ("Transcribing", theme::LABEL),
                 HudState::Done => ("Inserted", theme::LABEL),
+                HudState::Copied => ("Copied", theme::LABEL),
                 HudState::Error => ("Ready", theme::MUTED),
             };
             painter.text(

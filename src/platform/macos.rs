@@ -159,6 +159,16 @@ impl GlobalHotkey {
     }
 }
 
+/// What became of a finished dictation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insertion {
+    /// Pasted at the cursor, which is the ordinary outcome.
+    Pasted,
+    /// Left on the pasteboard because the destination was no longer frontmost.
+    /// The words survived; they just need a paste.
+    CopiedOnly,
+}
+
 /// Return the frontmost application's process ID without activating it.
 pub fn frontmost_application_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()
@@ -171,12 +181,7 @@ pub fn frontmost_application_pid() -> Option<i32> {
 /// The transcript stays on the pasteboard: restoring it on a timer can race a
 /// busy target application's asynchronous paste handling and insert stale data.
 /// Accessibility permission is required for the synthesized key event.
-pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
-    if frontmost_application_pid() != Some(target_pid) {
-        return Err(anyhow!(
-            "The destination app changed while dictating; text was not inserted"
-        ));
-    }
+pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     // Checked before the pasteboard is touched, so a missing permission does
     // not silently replace the user's clipboard on the way to doing nothing.
     if !can_synthesize_input() {
@@ -190,6 +195,13 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
     clipboard
         .set_text(text)
         .context("Could not set macOS pasteboard")?;
+    // The pasteboard is written before this is checked, so that a dictation
+    // whose destination has gone away still leaves the user holding their
+    // words. Pasting somewhere the user is no longer looking would put text
+    // into the wrong document, which is worse than not pasting at all.
+    if frontmost_application_pid() != Some(target_pid) {
+        return Ok(Insertion::CopiedOnly);
+    }
     let source = CGEventSource::new(CGEventSourceStateID::Private)
         .map_err(|_| anyhow!("Could not create keyboard event source"))?;
     let down = CGEvent::new_keyboard_event(source.clone(), V_KEYCODE, true)
@@ -200,7 +212,7 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<()> {
         .map_err(|_| anyhow!("Could not create paste key-up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagCommand);
     up.post(CGEventTapLocation::Session);
-    Ok(())
+    Ok(Insertion::Pasted)
 }
 
 #[cfg(test)]

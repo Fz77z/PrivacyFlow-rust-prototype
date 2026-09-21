@@ -61,7 +61,7 @@ fn bars_for(appearance: &Appearance) -> [Bar; 4] {
         let color = match appearance.state {
             HudState::Listening => theme::LISTENING,
             HudState::Processing => theme::TRANSCRIBING,
-            HudState::Done => theme::INSERTED,
+            HudState::Done | HudState::Copied => theme::INSERTED,
             _ => theme::IDLE,
         };
         return [Bar::Filled(color); 4];

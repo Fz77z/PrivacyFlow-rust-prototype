@@ -1,5 +1,7 @@
 use crate::audio::{CapturedAudio, Microphone};
-use crate::platform::{frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent};
+use crate::platform::{
+    frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
+};
 use crate::router::{KevWorker, RouteResult};
 use crate::state::{dur_ms, AppState, Failure, HudState, RecordingState, Timings, WorkerStatus};
 use crate::ui;
@@ -18,6 +20,7 @@ struct WorkItem {
     target_pid: Option<i32>,
 }
 struct WorkResult {
+    insertion: Insertion,
     transcript: String,
     route_result: Option<RouteResult>,
     output: String,
@@ -52,6 +55,12 @@ pub struct LocalFlowApp {
 impl LocalFlowApp {
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
         install_visuals(&cc.egui_ctx);
+        // The capsule floats over whatever the user is writing in, so clicking
+        // it to drag it or to open the console must not take focus away from
+        // that. Done here because the window exists by the time this runs and
+        // the console, which is a normal window and should take focus, does
+        // not exist yet.
+        crate::platform::make_windows_non_activating();
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
             match GlobalHotkey::right_option(move || repaint.request_repaint()) {
@@ -201,7 +210,14 @@ impl LocalFlowApp {
             self.fail(failure);
         } else {
             self.state.recording = RecordingState::Idle;
-            self.state.hud = HudState::Done;
+            // A dictation whose destination went away is still a success from
+            // the user's side: the words exist and are on the pasteboard. It
+            // is reported as its own state rather than as either a clean
+            // insert or a failure, because it is neither.
+            self.state.hud = match result.insertion {
+                Insertion::Pasted => HudState::Done,
+                Insertion::CopiedOnly => HudState::Copied,
+            };
             self.state.push_history(None);
             self.state.done_at = Some(Instant::now());
         }
@@ -454,17 +470,20 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         }
     };
     let insert_started = Instant::now();
-    if let Err(error) = insert_text(&inference.output, target_pid) {
-        return failed(
-            timings,
-            speech_finished,
-            inference.transcript,
-            Some(inference.route),
-            String::new(),
-            "Couldn't insert",
-            error.to_string(),
-        );
-    }
+    let insertion = match insert_text(&inference.output, target_pid) {
+        Ok(insertion) => insertion,
+        Err(error) => {
+            return failed(
+                timings,
+                speech_finished,
+                inference.transcript,
+                Some(inference.route),
+                String::new(),
+                "Couldn't insert",
+                error.to_string(),
+            )
+        }
+    };
     timings.insert_ms = Some(dur_ms(insert_started.elapsed()));
     timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
     WorkResult {
@@ -473,6 +492,7 @@ fn process(worker: &mut Result<KevWorker, String>, audio_dir: &Path, item: WorkI
         output: inference.output,
         timings,
         failure: None,
+        insertion,
     }
 }
 
@@ -487,6 +507,8 @@ fn failed(
 ) -> WorkResult {
     timings.total_ms = Some(dur_ms(speech_finished.elapsed()));
     WorkResult {
+        // A failure never pasted anything, by definition.
+        insertion: Insertion::CopiedOnly,
         transcript,
         route_result,
         output,

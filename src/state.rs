@@ -6,6 +6,11 @@ pub enum HudState {
     Listening,
     Processing,
     Done,
+    /// Transcribed and put on the pasteboard, but not pasted, because the
+    /// destination the user started dictating into was no longer frontmost.
+    /// This is a success with a caveat rather than a failure: the words are
+    /// in the user's hands, they just need a paste.
+    Copied,
     Error,
 }
 
