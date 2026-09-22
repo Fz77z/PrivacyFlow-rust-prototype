@@ -15,16 +15,15 @@ pub const MARK_SIZE: Vec2 = Vec2::new(36.0, 30.0);
 pub const MARK_GAP: f32 = 11.0;
 pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
-/// The bead: the capsule at rest in minimal mode.
+/// The bead: the capsule at rest in minimal mode, where it is hidden.
 ///
-/// Only slightly smaller than the dictating size, and the same 2:1 shape, so
-/// growing from one to the other is a pure scale. Anything else changes the
-/// widget's proportions mid-animation, which reads as the shape deforming
-/// rather than as one object getting bigger.
-pub const BEAD_SIZE: Vec2 = Vec2::new(72.0, 36.0);
-/// The dictating size. The bead at a slightly larger scale, same shape, so
-/// beginning to speak reads as the capsule growing rather than as a new thing
-/// arriving.
+/// Never seen standing still. It is the size the capsule fades in from when
+/// the user starts dictating and shrinks back to as it fades out, so it is
+/// half the dictating size: small enough that appearing reads as the capsule
+/// popping open, and the same 2:1 shape, so the growth is a pure scale rather
+/// than a shape deforming mid-animation.
+pub const BEAD_SIZE: Vec2 = Vec2::new(44.0, 22.0);
+/// The dictating size. The bead at twice the scale, same shape.
 pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 
 /// The window itself, which never changes size.

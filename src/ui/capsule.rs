@@ -126,19 +126,9 @@ pub fn show(
     painter.set_opacity(presence);
     let failure = failure_for(state);
     // Minimal mode has no outline: the capsule is a plain shape on its
-    // shadow. The one exception is an unread failure, which rings the bead
-    // in red, because that ring is the only way a failure raised while the
-    // user was typing elsewhere can still be seen once the capsule has
-    // shrunk: there is no console icon at that size, and so nowhere to put
-    // the unread dot.
-    let small = painted.x < theme::ACTIVE_SIZE.x;
-    let outline = if small && state.unread_failure {
-        Some(theme::ERROR)
-    } else if state.settings.minimal_mode {
-        None
-    } else {
-        Some(border_for(state, failure.is_some()))
-    };
+    // shadow. An unread failure is carried by the menu bar icon, which is
+    // still there when the capsule has hidden.
+    let outline = (!state.settings.minimal_mode).then(|| border_for(state, failure.is_some()));
     // All three sizes are pills, so the radius is half the height at every
     // point of the animation. Interpolating between three stored radii would
     // be a second thing that has to agree with the first.

@@ -210,8 +210,8 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     ui.add_space(2.0);
     ui.label(
         RichText::new(
-            "Shrink the capsule to a small bead when it is not in use. It grows while you \
-             dictate, and when you point at it.",
+            "Hide the capsule when it is not in use. It appears while you dictate, and \
+             when you rest the pointer where it lives. LocalFlow stays in the menu bar.",
         )
         .small()
         .color(theme::MUTED),

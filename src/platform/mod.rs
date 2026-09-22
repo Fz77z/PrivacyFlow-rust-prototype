@@ -2,6 +2,8 @@
 mod macos;
 #[cfg(target_os = "macos")]
 mod nonactivating;
+#[cfg(target_os = "macos")]
+pub mod status_item;
 
 #[cfg(target_os = "macos")]
 pub use macos::*;

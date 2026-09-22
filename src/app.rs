@@ -12,13 +12,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
-/// How long the bead takes to fade between faint and solid. Opacity has no
-/// momentum worth modelling, so this is a plain fade rather than a spring.
-const PRESENCE_SECONDS: f32 = 0.25;
+/// How long the capsule takes to fade in and out in minimal mode. Quick to
+/// appear, because it appears in answer to the user pressing the key, and
+/// slower to go, so it leaves rather than vanishes. Opacity has no momentum
+/// worth modelling, so these are plain fades rather than springs.
+const APPEAR_SECONDS: f32 = 0.1;
+const DISAPPEAR_SECONDS: f32 = 0.3;
 
-/// How solid the bead is drawn while nothing is happening and nobody is
-/// pointing at it. Faint enough to stay out of the way, solid enough to find.
-const RESTING_PRESENCE: f32 = 0.55;
+/// How long the pointer has to rest where the hidden capsule lives before it
+/// appears. Without a pause, every pointer passing across that spot on its
+/// way somewhere else would flash the capsule open over the user's work.
+const REVEAL_DELAY: Duration = Duration::from_millis(300);
 
 /// Matches the capture buffer's ceiling. Reaching it stops the recording; it
 /// does not throw away what was captured.
@@ -192,6 +196,12 @@ pub struct LocalFlowApp {
     /// Whether the capsule's window is currently letting clicks through.
     /// Tracked so the command is sent when it changes rather than every frame.
     passing_clicks_through: bool,
+    /// When the pointer arrived where the capsule lives, while it is there.
+    /// The capsule only opens once the pointer has stayed for REVEAL_DELAY.
+    reaching_since: Option<Instant>,
+    /// LocalFlow's icon in the menu bar, and the choices made from its menu.
+    status_item: crate::platform::status_item::StatusItem,
+    menu_choices: std::sync::mpsc::Receiver<crate::platform::status_item::MenuChoice>,
     work_tx: Sender<Work>,
     result_rx: Receiver<PipelineMessage>,
     recording_started: Option<Instant>,
@@ -241,6 +251,9 @@ impl LocalFlowApp {
         // window, so it does not matter that the console is created later.
         let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
         crate::platform::remove_capsule_system_shadow(cc);
+        let menu_repaint = cc.egui_ctx.clone();
+        let (status_item, menu_choices) =
+            crate::platform::status_item::StatusItem::install(move || menu_repaint.request_repaint());
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
             match GlobalHotkey::right_option(move || repaint.request_repaint()) {
@@ -346,6 +359,9 @@ impl LocalFlowApp {
             hotkey_events,
             pointer_zone: hotkey.pointer_zone(),
             passing_clicks_through: false,
+            reaching_since: None,
+            status_item,
+            menu_choices,
             _hotkey: hotkey,
             work_tx,
             result_rx,
@@ -617,8 +633,22 @@ impl LocalFlowApp {
         });
         // A context menu can hang outside the reach, and the capsule must not
         // shrink or let clicks fall through it while the user is choosing.
+        self.reaching_since = if reaching {
+            Some(self.reaching_since.unwrap_or_else(Instant::now))
+        } else {
+            None
+        };
+        let dwelled = match self.reaching_since {
+            Some(since) if since.elapsed() >= REVEAL_DELAY => true,
+            Some(since) => {
+                // Nothing else wakes the UI while the pointer holds still.
+                ctx.request_repaint_after(REVEAL_DELAY - since.elapsed());
+                false
+            }
+            None => false,
+        };
         let pointing =
-            minimal && (reaching || self.dragging || ctx.is_context_menu_open());
+            minimal && (dwelled || self.dragging || ctx.is_context_menu_open());
         // Everywhere outside the reach is empty window, which used to swallow
         // every click aimed at whatever was underneath. Until the window's
         // place on screen is known the zone cannot be watched either, so
@@ -630,7 +660,9 @@ impl LocalFlowApp {
         }
         // Claimed every frame the pointer is over the capsule, since the app
         // underneath set the cursor last and nothing else will set it back.
-        if reaching {
+        // Not while clicks pass through, because then the capsule is not
+        // what the pointer is over.
+        if reaching && !pass_clicks_through {
             crate::platform::show_arrow_cursor();
         }
         // Only the recording itself grows the capsule. Once the key is let go
@@ -654,16 +686,14 @@ impl LocalFlowApp {
         if width_moving || height_moving {
             ctx.request_repaint();
         }
-        // Faint only when the bead is simply resting. An unread failure keeps
-        // it solid, because a tinted bead is the only place that failure can
-        // still be seen.
-        let resting = size == ui::capsule::CapsuleSize::Bead
-            && self.state.hud == HudState::Idle
-            && !self.state.unread_failure;
+        // Hidden whenever nothing is happening. An unread failure does not
+        // keep it on screen: the menu bar icon turns red for that instead.
+        let resting =
+            size == ui::capsule::CapsuleSize::Bead && self.state.hud == HudState::Idle;
         let presence = ctx.animate_value_with_time(
             egui::Id::new("capsule_presence"),
-            if resting { RESTING_PRESENCE } else { 1.0 },
-            PRESENCE_SECONDS,
+            if resting { 0.0 } else { 1.0 },
+            if resting { DISAPPEAR_SECONDS } else { APPEAR_SECONDS },
         );
         (
             egui::vec2(self.capsule_width.value(), self.capsule_height.value()),
@@ -779,6 +809,27 @@ impl eframe::App for LocalFlowApp {
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
         let mut raise_console = false;
+        while let Ok(choice) = self.menu_choices.try_recv() {
+            match choice {
+                crate::platform::status_item::MenuChoice::OpenConsole => {
+                    self.state.open_console();
+                    raise_console = true;
+                }
+                crate::platform::status_item::MenuChoice::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close)
+                }
+            }
+        }
+        // The menu bar icon carries an unread failure, because in minimal
+        // mode the capsule is hidden when the failure is most likely to be
+        // missed: after the dictation, while the user is back at work.
+        let unread = self.state.unread_failure.then(|| {
+            self.state
+                .last_failure
+                .as_ref()
+                .map_or("A dictation failed", |failure| failure.detail.as_str())
+        });
+        self.status_item.show_alert(unread);
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {

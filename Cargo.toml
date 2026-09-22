@@ -29,5 +29,5 @@ raw-window-handle = "0.6"
 # accessory activation policy.
 winit = "0.30"
 objc2-foundation = { version = "0.3", features = ["NSThread"] }
-objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSWindow", "NSResponder", "NSEvent", "NSCursor", "NSScreen", "NSView", "libc"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSWindow", "NSResponder", "NSEvent", "NSCursor", "NSScreen", "NSView", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSMenu", "NSMenuItem", "NSImage", "NSColor", "libc"] }
 
