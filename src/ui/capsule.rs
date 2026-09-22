@@ -40,16 +40,17 @@ impl CapsuleSize {
 /// expressed as a signature: the application never changes the capsule's
 /// shape on its own, and there is no argument here through which it could.
 ///
-/// `active` is "a dictation has begun and its result has not yet retired",
-/// which the hud state already answers.
-pub fn size_for(minimal: bool, pointing: bool, active: bool) -> CapsuleSize {
+/// `recording` is "the microphone is capturing right now". Transcribing and
+/// the result that follows are shown at bead size, in the bars' colour, so
+/// the capsule shrinks back the moment the user lets go.
+pub fn size_for(minimal: bool, pointing: bool, recording: bool) -> CapsuleSize {
     if !minimal {
         return CapsuleSize::Full;
     }
     if pointing {
         return CapsuleSize::Full;
     }
-    if active {
+    if recording {
         return CapsuleSize::Active;
     }
     CapsuleSize::Bead
@@ -131,21 +132,28 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     // point of the animation. Interpolating between three stored radii would
     // be a second thing that has to agree with the first.
     let radius = rect.height() / 2.0;
-    painter.rect_filled(rect, Rounding::same(radius), theme::FILL);
     // The outline sits outside the fill rather than inside it. Stroking the
     // shape itself puts the line within the capsule, which at bead size eats
     // a visible share of a small shape and reads as a shrunken inner ring.
     //
-    // The expanded rect's rounding has to grow by the same amount it was
+    // It is painted as a solid pill with the fill laid on top, not as a
+    // stroke beside the fill. A stroke and a fill that meet at an edge each
+    // anti-alias their half of it at partial coverage, and the desktop shows
+    // through the seam as a light hairline that looks jagged around the
+    // curves at 1x. Laid on top, the fill's soft edge blends into the
+    // outline instead, and only the outer edge ever meets the desktop.
+    //
+    // The outline's rounding has to grow by the same amount its rect was
     // expanded by. Inheriting the shape's radius leaves the two curves
     // non-concentric: they stay together along the straight edges and open a
     // gap at the rounded ends, which is exactly where this capsule is all
     // curve.
-    painter.rect_stroke(
-        rect.expand(EDGE_WIDTH / 2.0),
-        Rounding::same(radius + EDGE_WIDTH / 2.0),
-        Stroke::new(EDGE_WIDTH, border),
+    painter.rect_filled(
+        rect.expand(EDGE_WIDTH),
+        Rounding::same(radius + EDGE_WIDTH),
+        border,
     );
+    painter.rect_filled(rect, Rounding::same(radius), theme::FILL);
 
     // The body is everything the icon does not claim, so dragging the widget
     // works anywhere the user naturally grabs it.
@@ -480,8 +488,8 @@ mod tests {
     #[test]
     fn with_minimal_mode_off_the_capsule_is_always_full_size() {
         for pointing in [false, true] {
-            for active in [false, true] {
-                assert_eq!(size_for(false, pointing, active), CapsuleSize::Full);
+            for recording in [false, true] {
+                assert_eq!(size_for(false, pointing, recording), CapsuleSize::Full);
             }
         }
     }

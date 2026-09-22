@@ -523,16 +523,12 @@ impl LocalFlowApp {
             // No pointer at all means it is outside the catchment entirely.
             (true, None) => self.dragging,
         };
-        // A dictation that has not yet retired counts as active, with one
-        // exception: a startup failure deliberately clears `done_at` so it
-        // never retires on its own. Without carving that out, `active` would
-        // stay true for the rest of the session, pinning a minimal-mode
-        // capsule at the dictating size forever with no user action behind
-        // it, the governing rule inverted. Every mid-dictation failure goes
-        // through `record_failure` and then `settle`, which sets `done_at`.
-        let active = self.state.hud != HudState::Idle
-            && !(self.state.hud == HudState::Error && self.state.done_at.is_none());
-        let size = ui::capsule::size_for(minimal, pointing, active);
+        // Only the recording itself grows the capsule. Once the key is let go
+        // the bead is enough to carry transcribing and the result in colour,
+        // and the hud is not a substitute for this: it stays Listening for a
+        // moment after release, until transcription is worth announcing.
+        let recording = self.recording_started.is_some();
+        let size = ui::capsule::size_for(minimal, pointing, recording);
         // Animated, because this is now drawing rather than an operating
         // system window resize. Both axes are eased on the same clock, so the
         // capsule cannot shear.
