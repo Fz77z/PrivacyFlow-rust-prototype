@@ -768,6 +768,71 @@ impl eframe::App for PrivacyFlowApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.advance_dictation(ctx);
+
+        // Where the capsule has never been moved and nothing was remembered,
+        // there is nothing to place it from until the window manager has put
+        // it somewhere. That position only exists once the viewport has been
+        // shown, so it is read back here, on the first frame it is available,
+        // rather than guessed at construction.
+        if self.centre.is_none() {
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                self.centre =
+                    Some(crate::window_position::Centre { x: rect.center().x, y: rect.center().y });
+            }
+        }
+
+        self.follow_setting_with_the_window(ctx);
+        let painted = self.choose_shape(ctx);
+
+        // A console buried behind other windows is exactly when someone
+        // reaches for the menu item, so opening it also raises it.
+        let mut raise_console = self.receive_menu_choices(ctx);
+        // The menu bar icon carries an unread failure as well as the cog,
+        // because the failure is most likely to be missed after the
+        // dictation, while the user is back at work and not looking at the
+        // capsule.
+        let unread = self.state.unread_failure.then(|| {
+            self.state
+                .last_failure
+                .as_ref()
+                .map_or("A dictation failed", |failure| failure.detail.as_str())
+        });
+        self.status_item.show_alert(unread);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                let response =
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
+                self.dragging = response.dragging;
+                if let Some(action) = response.action {
+                    raise_console |= self.apply_capsule_action(ctx, action);
+                }
+            });
+
+        // Painted after the capsule so it is placed from the centre this
+        // frame's drag may just have changed, and retired first so a toast
+        // whose time is up never gets one more frame of window.
+        self.state.retire_toast(ui::toast::DWELL);
+        if let (Some(toast), Some(centre)) = (self.state.toast.clone(), self.centre) {
+            ui::toast::show(ctx, &toast, centre, &crate::platform::work_areas());
+            // Nothing else wakes the UI while a toast is up: the dictation it
+            // describes has already finished, so without this the fade would
+            // stop on whatever frame the capsule last needed.
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+
+        if self.state.console_open {
+            self.show_console(ctx, raise_console);
+        }
+    }
+}
+
+impl PrivacyFlowApp {
+    /// Move the dictation along by one frame: take hotkey presses and
+    /// pipeline answers, stop a capture that has to stop, and keep the
+    /// capsule's listening and transcribing states animating.
+    fn advance_dictation(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.hotkey_events.try_recv() {
             match event {
                 HotkeyEvent::Pressed => self.start_recording(),
@@ -841,24 +906,11 @@ impl eframe::App for PrivacyFlowApp {
         if self.state.processing_since.is_some() {
             ctx.request_repaint_after(PROCESSING_ANNOUNCE_DELAY);
         }
+    }
 
-        // Where the capsule has never been moved and nothing was remembered,
-        // there is nothing to place it from until the window manager has put
-        // it somewhere. That position only exists once the viewport has been
-        // shown, so it is read back here, on the first frame it is available,
-        // rather than guessed at construction.
-        if self.centre.is_none() {
-            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-                self.centre =
-                    Some(crate::window_position::Centre { x: rect.center().x, y: rect.center().y });
-            }
-        }
-
-        self.follow_setting_with_the_window(ctx);
-        let painted = self.choose_shape(ctx);
-
-        // A console buried behind other windows is exactly when someone
-        // reaches for the menu item, so opening it also raises it.
+    /// Act on what was chosen from the menu bar icon since the last frame.
+    /// Returns whether the console should be raised.
+    fn receive_menu_choices(&mut self, ctx: &egui::Context) -> bool {
         let mut raise_console = false;
         while let Ok(choice) = self.menu_choices.try_recv() {
             match choice {
@@ -877,97 +929,76 @@ impl eframe::App for PrivacyFlowApp {
                 }
             }
         }
-        // The menu bar icon carries an unread failure as well as the cog,
-        // because the failure is most likely to be missed after the
-        // dictation, while the user is back at work and not looking at the
-        // capsule.
-        let unread = self.state.unread_failure.then(|| {
-            self.state
-                .last_failure
-                .as_ref()
-                .map_or("A dictation failed", |failure| failure.detail.as_str())
-        });
-        self.status_item.show_alert(unread);
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                let response =
-                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
-                self.dragging = response.dragging;
-                if let Some(action) = response.action {
-                    match action {
-                        ui::capsule::CapsuleAction::ToggleConsole => {
-                            if self.state.console_open {
-                                self.state.console_open = false;
-                            } else {
-                                self.state.open_console();
-                                raise_console = true;
-                            }
-                        }
-                        // The menu item says "Open console", so it opens one:
-                        // an already-open console is raised rather than shut.
-                        ui::capsule::CapsuleAction::OpenConsole => {
-                            self.state.open_console();
-                            raise_console = true;
-                        }
-                        ui::capsule::CapsuleAction::Moved(position) => {
-                            // Converted with the size of the window that was
-                            // actually dragged, not with the catchment's.
-                            // Minimal mode off gives a window barely larger
-                            // than the capsule, and using the catchment's
-                            // size there put the remembered centre tens of
-                            // points adrift, once per drag, compounding
-                            // across restarts.
-                            let centre = crate::window_position::centre_of_window(
-                                (position.x, position.y),
-                                (self.window_size.x, self.window_size.y),
-                            );
-                            self.centre = Some(centre);
-                            crate::window_position::save(&self.data_dir, centre);
-                        }
-                        ui::capsule::CapsuleAction::Quit => {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close)
-                        }
-                    }
+        raise_console
+    }
+
+    /// Act on what the user did to the capsule this frame. Returns whether
+    /// the console should be raised.
+    fn apply_capsule_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: ui::capsule::CapsuleAction,
+    ) -> bool {
+        match action {
+            ui::capsule::CapsuleAction::ToggleConsole => {
+                if self.state.console_open {
+                    self.state.console_open = false;
+                    return false;
                 }
-            });
-
-        // Painted after the capsule so it is placed from the centre this
-        // frame's drag may just have changed, and retired first so a toast
-        // whose time is up never gets one more frame of window.
-        self.state.retire_toast(ui::toast::DWELL);
-        if let (Some(toast), Some(centre)) = (self.state.toast.clone(), self.centre) {
-            ui::toast::show(ctx, &toast, centre, &crate::platform::work_areas());
-            // Nothing else wakes the UI while a toast is up: the dictation it
-            // describes has already finished, so without this the fade would
-            // stop on whatever frame the capsule last needed.
-            ctx.request_repaint_after(Duration::from_millis(16));
-        }
-
-        if self.state.console_open {
-            let builder = egui::ViewportBuilder::default()
-                .with_title("PrivacyFlow")
-                .with_inner_size([640.0, 520.0])
-                .with_min_inner_size([520.0, 400.0]);
-            let data_dir = self.data_dir.clone();
-            let state = &mut self.state;
-            let microphone_name = self.microphone.as_ref().map(|m| m.device_name());
-            // Immediate rather than deferred: a deferred viewport's callback must be
-            // Fn + Send + Sync + 'static, which would force AppState behind a mutex
-            // for no reason other than the signature.
-            let stay_open = ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("console"),
-                builder,
-                move |ctx, _class| {
-                    if raise_console {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    ui::console::show(ctx, state, &data_dir, microphone_name)
-                },
-            );
-            if !stay_open {
-                self.state.console_open = false;
+                self.state.open_console();
+                true
             }
+            // The menu item says "Open console", so it opens one: an
+            // already-open console is raised rather than shut.
+            ui::capsule::CapsuleAction::OpenConsole => {
+                self.state.open_console();
+                true
+            }
+            ui::capsule::CapsuleAction::Moved(position) => {
+                // Converted with the size of the window that was actually
+                // dragged, not with the catchment's. Minimal mode off gives a
+                // window barely larger than the capsule, and using the
+                // catchment's size there put the remembered centre tens of
+                // points adrift, once per drag, compounding across restarts.
+                let centre = crate::window_position::centre_of_window(
+                    (position.x, position.y),
+                    (self.window_size.x, self.window_size.y),
+                );
+                self.centre = Some(centre);
+                crate::window_position::save(&self.data_dir, centre);
+                false
+            }
+            ui::capsule::CapsuleAction::Quit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                false
+            }
+        }
+    }
+
+    /// Show the console window, raising it if it was just asked for.
+    fn show_console(&mut self, ctx: &egui::Context, raise_console: bool) {
+        let builder = egui::ViewportBuilder::default()
+            .with_title("PrivacyFlow")
+            .with_inner_size([640.0, 520.0])
+            .with_min_inner_size([520.0, 400.0]);
+        let data_dir = self.data_dir.clone();
+        let state = &mut self.state;
+        let microphone_name = self.microphone.as_ref().map(|m| m.device_name());
+        // Immediate rather than deferred: a deferred viewport's callback must be
+        // Fn + Send + Sync + 'static, which would force AppState behind a mutex
+        // for no reason other than the signature.
+        let stay_open = ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("console"),
+            builder,
+            move |ctx, _class| {
+                if raise_console {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                ui::console::show(ctx, state, &data_dir, microphone_name)
+            },
+        );
+        if !stay_open {
+            self.state.console_open = false;
         }
     }
 }

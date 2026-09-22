@@ -658,7 +658,7 @@ mod tests {
     /// anything above the floor goes on to the worker.
     #[test]
     fn quiet_speech_just_above_the_floor_is_still_a_dictation() {
-        let samples = tone(1.0, SILENCE_RMS as f32 * 4.0, 16_000);
+        let samples = tone(1.0, SILENCE_RMS * 4.0, 16_000);
         assert!(matches!(verdict(&samples, 16_000), Verdict::Speech { .. }));
     }
 

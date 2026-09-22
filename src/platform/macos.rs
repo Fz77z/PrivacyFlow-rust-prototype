@@ -114,7 +114,7 @@ pub fn focused_field(pid: i32) -> FocusedField {
         let key = CFString::new("AXValue");
         let mut settable: u8 = 0;
         let status = AXUIElementIsAttributeSettable(
-            focused as *const c_void,
+            focused,
             key.as_concrete_TypeRef(),
             &mut settable,
         );

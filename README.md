@@ -20,13 +20,8 @@ The resident Python process loads and warms all three models once. It is a narro
 
 ## Run
 
-The repositories must remain siblings:
-
-```text
-Desktop/
-├── privacyflow/
-└── localflow-research/
-```
+PrivacyFlow expects the research checkout at `~/Desktop/localflow-research`, wherever PrivacyFlow itself is checked out.
+Set `PRIVACYFLOW_RESEARCH_ROOT` if it lives somewhere else.
 
 The research runtime and the already-downloaded Whisper model are used without configuration.
 
@@ -112,8 +107,7 @@ It removes the entry and nothing re-creates it, which leaves the app quietly una
 The app has no Dock icon by design.
 It is a floating widget, so it is quit from the capsule's right-click menu or from the console window.
 
-The app still expects the research checkout at `~/Desktop/localflow-research`.
-Set `PRIVACYFLOW_RESEARCH_ROOT` if it lives somewhere else.
+The installed app looks for the research checkout in the same place, `~/Desktop/localflow-research` unless `PRIVACYFLOW_RESEARCH_ROOT` says otherwise.
 If the runtime is missing, the console names the exact path that was searched and the file that was not found.
 
 ## Insertion behavior
