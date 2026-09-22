@@ -134,7 +134,7 @@ fn is_reachable(centre: Centre, areas: &[WorkArea]) -> bool {
 }
 
 /// The display a centre sits on, if any.
-fn area_for(centre: Centre, areas: &[WorkArea]) -> Option<&WorkArea> {
+pub fn area_for(centre: Centre, areas: &[WorkArea]) -> Option<&WorkArea> {
     let x = centre.x as f64;
     let y = centre.y as f64;
     areas.iter().find(|area| {

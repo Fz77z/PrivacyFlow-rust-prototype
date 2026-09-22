@@ -7,7 +7,8 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use objc2_app_kit::{NSEvent, NSScreen, NSWorkspace};
-use core_foundation::base::TCFType;
+use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::string::{CFString, CFStringRef};
 use objc2_foundation::MainThreadMarker;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -36,6 +37,100 @@ extern "C" {
     /// than 0 or 1 is undefined behaviour, and nothing in the C contract
     /// promises the API will only ever produce those two.
     fn AXIsProcessTrusted() -> u8;
+    fn AXUIElementCreateApplication(pid: i32) -> *const c_void;
+    fn AXUIElementCopyAttributeValue(
+        element: *const c_void,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementIsAttributeSettable(
+        element: *const c_void,
+        attribute: CFStringRef,
+        settable: *mut u8,
+    ) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: *const c_void, seconds: f32) -> i32;
+}
+
+/// How long an application is given to answer a question about its own
+/// focus.
+///
+/// Measured rather than chosen: the slowest first answer observed across the
+/// applications on this machine was 413 ms, from a Finder window whose
+/// accessibility tree had not been built yet. Later answers from the same
+/// application come back in single figures. A second is therefore slack
+/// rather than a budget, and it is only ever spent immediately before a paste
+/// that would otherwise go somewhere it should not.
+const AX_TIMEOUT_SECONDS: f32 = 1.0;
+
+/// Whether the thing with the keyboard in a given application can take typed
+/// text.
+///
+/// Three answers rather than two, because applications differ in what they
+/// will say. Most name their focused element and describe it accurately.
+/// Some expose no accessibility tree at all and answer nothing, and their
+/// silence is not a refusal: it means the question could not be asked, not
+/// that the answer is no. Collapsing `Unknown` into `NotEditable` would stop
+/// LocalFlow pasting into every such application, which is a large and silent
+/// regression for the applications least able to report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusedField {
+    Editable,
+    NotEditable,
+    Unknown,
+}
+
+/// Ask an accessibility element for one attribute. The caller owns what comes
+/// back and must release it.
+unsafe fn ax_attribute(element: *const c_void, name: &str) -> Option<CFTypeRef> {
+    let key = CFString::new(name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let status = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
+    if status != 0 || value.is_null() {
+        return None;
+    }
+    Some(value)
+}
+
+/// What the focused element of `pid` says about itself.
+///
+/// The one question asked is whether the element's value can be set, which is
+/// what "you can type here" means in accessibility terms. It was chosen from
+/// what applications on this machine actually report: every real input says
+/// yes, while a Finder window's file list, a browser's page body and a chat
+/// application's channel list all say no. The obvious alternative, the
+/// presence of a selected text range, was rejected because static message
+/// text and non-editable lists both carry one.
+pub fn focused_field(pid: i32) -> FocusedField {
+    unsafe {
+        let application = AXUIElementCreateApplication(pid);
+        if application.is_null() {
+            return FocusedField::Unknown;
+        }
+        AXUIElementSetMessagingTimeout(application, AX_TIMEOUT_SECONDS);
+        let Some(focused) = ax_attribute(application, "AXFocusedUIElement") else {
+            CFRelease(application as CFTypeRef);
+            return FocusedField::Unknown;
+        };
+        let key = CFString::new("AXValue");
+        let mut settable: u8 = 0;
+        let status = AXUIElementIsAttributeSettable(
+            focused as *const c_void,
+            key.as_concrete_TypeRef(),
+            &mut settable,
+        );
+        CFRelease(focused);
+        CFRelease(application as CFTypeRef);
+        // A non-zero status means the application could not answer, which is
+        // not the same as it answering no.
+        if status != 0 {
+            return FocusedField::Unknown;
+        }
+        if settable != 0 {
+            FocusedField::Editable
+        } else {
+            FocusedField::NotEditable
+        }
+    }
 }
 
 /// Whether macOS will actually deliver the synthetic keystrokes LocalFlow
@@ -49,6 +144,22 @@ pub fn can_synthesize_input() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
+/// Whether an observed event could have put the text cursor somewhere other
+/// than where LocalFlow last left it.
+///
+/// Only presses count. A pointer crossing the screen moves nothing, and Right
+/// Option arrives as a flags change rather than a key press, so holding push
+/// to talk does not count as the user having moved.
+fn moves_the_cursor(event_type: CGEventType) -> bool {
+    matches!(
+        event_type,
+        CGEventType::KeyDown
+            | CGEventType::LeftMouseDown
+            | CGEventType::RightMouseDown
+            | CGEventType::OtherMouseDown
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HotkeyEvent {
     Pressed,
@@ -58,9 +169,40 @@ pub enum HotkeyEvent {
 /// A passive native event tap for the fixed MVP push-to-talk key: Right Option.
 /// It reads raw key codes, avoiding keyboard-layout translation in third-party
 /// hotkey crates and leaving the key event untouched for the operating system.
-pub struct GlobalHotkey;
+///
+/// The same tap also reports whether the user has pressed or clicked anything,
+/// which is how LocalFlow knows its memory of the cursor has gone stale. The
+/// events are counted, never inspected: nothing reads a key code from them.
+#[derive(Default)]
+pub struct GlobalHotkey {
+    moved_cursor: CursorMoved,
+}
+
+/// Whether the user has pressed or clicked anything, shared with whoever needs
+/// to know. Handed to the pipeline worker, which is where insertions happen
+/// and therefore where a stale memory of the cursor would do damage.
+#[derive(Clone, Default)]
+pub struct CursorMoved(Arc<AtomicBool>);
+
+impl CursorMoved {
+    /// Whether anything has been pressed or clicked since this was last asked.
+    /// Asking clears it, because each dictation only cares about the interval
+    /// since the one before it.
+    pub fn take(&self) -> bool {
+        self.0.swap(false, Ordering::Relaxed)
+    }
+
+    fn record(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
 
 impl GlobalHotkey {
+    /// A handle onto the same flag the tap writes.
+    pub fn cursor_moved(&self) -> CursorMoved {
+        self.moved_cursor.clone()
+    }
+
     pub fn right_option(
         wake_ui: impl Fn() + Send + 'static,
     ) -> Result<(Self, Receiver<HotkeyEvent>)> {
@@ -69,6 +211,8 @@ impl GlobalHotkey {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let held = Arc::new(AtomicBool::new(false));
         let active = held.clone();
+        let moved_cursor = CursorMoved::default();
+        let observed_movement = moved_cursor.clone();
 
         // A HID event-tap callback must never wait for egui's repaint lock.
         // Forward events and request a repaint from an ordinary thread instead.
@@ -100,7 +244,13 @@ impl GlobalHotkey {
                     CGEventTapLocation::HID,
                     CGEventTapPlacement::HeadInsertEventTap,
                     CGEventTapOptions::ListenOnly,
-                    vec![CGEventType::FlagsChanged],
+                    vec![
+                        CGEventType::FlagsChanged,
+                        CGEventType::KeyDown,
+                        CGEventType::LeftMouseDown,
+                        CGEventType::RightMouseDown,
+                        CGEventType::OtherMouseDown,
+                    ],
                     move |_proxy, event_type, event| {
                         if matches!(
                             event_type,
@@ -114,6 +264,13 @@ impl GlobalHotkey {
                             if !port.is_null() {
                                 unsafe { CGEventTapEnable(port, true) };
                             }
+                            return None;
+                        }
+                        // Recorded without reading the event: the only thing
+                        // LocalFlow wants to know is that the user touched
+                        // something, never what they touched.
+                        if moves_the_cursor(event_type) {
+                            observed_movement.record();
                             return None;
                         }
                         if matches!(event_type, CGEventType::FlagsChanged)
@@ -158,7 +315,7 @@ impl GlobalHotkey {
             .context("Could not start macOS global hotkey listener")?;
 
         match ready_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(Ok(())) => Ok((Self, event_rx)),
+            Ok(Ok(())) => Ok((Self { moved_cursor }, event_rx)),
             Ok(Err(error)) => Err(anyhow!(error)),
             Err(_) => Err(anyhow!("macOS global event tap did not become ready")),
         }
@@ -173,6 +330,11 @@ pub enum Insertion {
     /// Left on the pasteboard because the destination was no longer frontmost.
     /// The words survived; they just need a paste.
     CopiedOnly,
+    /// Left on the pasteboard because the destination had nothing focused
+    /// that could receive text. Pasting anyway is not harmless: a Cmd-V into
+    /// a Finder window pastes files, and into an application with its own
+    /// binding it fires that instead.
+    CopiedNoField,
 }
 
 /// Where the pointer is, in the same downward-y coordinates window positions
@@ -296,6 +458,11 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     if frontmost_application_pid() != Some(target_pid) {
         return Ok(Insertion::CopiedOnly);
     }
+    // Only a positive "that is not a text field" stops the paste. See
+    // `FocusedField` for why the application's silence does not.
+    if focused_field(target_pid) == FocusedField::NotEditable {
+        return Ok(Insertion::CopiedNoField);
+    }
     let source = CGEventSource::new(CGEventSourceStateID::Private)
         .map_err(|_| anyhow!("Could not create keyboard event source"))?;
     let down = CGEvent::new_keyboard_event(source.clone(), V_KEYCODE, true)
@@ -312,6 +479,26 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_and_clicking_put_the_cursor_somewhere_localflow_does_not_know() {
+        assert!(moves_the_cursor(CGEventType::KeyDown));
+        assert!(moves_the_cursor(CGEventType::LeftMouseDown));
+        assert!(moves_the_cursor(CGEventType::RightMouseDown));
+    }
+
+    #[test]
+    fn holding_push_to_talk_leaves_the_cursor_where_it_was() {
+        // Right Option arrives as a flags change rather than a key press, so
+        // starting a dictation must not invalidate the dictation before it.
+        assert!(!moves_the_cursor(CGEventType::FlagsChanged));
+    }
+
+    #[test]
+    fn pointing_at_something_without_clicking_leaves_the_cursor_where_it_was() {
+        assert!(!moves_the_cursor(CGEventType::MouseMoved));
+        assert!(!moves_the_cursor(CGEventType::ScrollWheel));
+    }
 
     #[test]
     fn left_option_does_not_keep_right_option_pressed() {

@@ -2048,6 +2048,7 @@ dependencies = [
  "rtrb",
  "serde",
  "serde_json",
+ "winit",
 ]
 
 [[package]]

@@ -20,6 +20,11 @@ pub enum HudState {
     /// failure: there was nothing to transcribe, so the capsule says so and
     /// settles back without filing anything.
     NoSpeech,
+    /// Speech was heard and could not be decoded. Not silence, because the
+    /// user spoke, and not a failure, because nothing broke: the words were
+    /// simply not understood, and saying nothing about it left the capsule
+    /// looking as though the dictation had evaporated.
+    NotUnderstood,
     Error,
 }
 
@@ -74,6 +79,19 @@ pub enum FailureKind {
     Dropped,
 }
 
+/// What became of the user's words when the pipeline failed after producing
+/// them. Preserving is not inserting: text that failed its processing is never
+/// typed into the document as though it had succeeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Preserved {
+    /// The raw transcription, because processing never completed.
+    Raw,
+    /// The finished text, which processing produced but insertion could not place.
+    Processed,
+    /// The words could not even be put on the pasteboard.
+    Unavailable(String),
+}
+
 /// A failure as the user experiences it: a kind, a headline short enough for
 /// the capsule, and the original message kept intact for the console.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +115,60 @@ impl Failure {
     }
 }
 
+/// Whether a toast is reporting a dictation that survived or one that was
+/// lost. The capsule's palette already answers that question in one colour,
+/// and the toast borrows the same answer rather than inventing a second one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Copied,
+    Failed,
+}
+
+/// What LocalFlow says when a dictation ends up on the clipboard instead of
+/// at the cursor.
+///
+/// The capsule already shows these outcomes, but only as one word, for 1.4
+/// seconds, in a widget the size of a thumbnail - and every one of them
+/// happens precisely because the text did not appear where the user was
+/// looking. The toast is the part of the answer that says what was kept and
+/// how to place it.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub kind: ToastKind,
+    pub headline: String,
+    /// The text that is actually on the clipboard, so that what the user
+    /// reads is what they will paste.
+    pub body: String,
+    pub footer: &'static str,
+    pub raised_at: Instant,
+}
+
+impl Toast {
+    fn copied(headline: &str, body: &str) -> Self {
+        Self {
+            kind: ToastKind::Copied,
+            headline: headline.to_owned(),
+            body: body.to_owned(),
+            footer: "Copied to clipboard · ⌘V",
+            raised_at: Instant::now(),
+        }
+    }
+
+    /// A failure's toast points at the console, because the reason a
+    /// dictation was lost is often longer than three lines - the
+    /// Accessibility remedy is a paragraph - and the console is where the
+    /// whole of it is kept.
+    fn failed(headline: &str, body: &str, footer: &'static str) -> Self {
+        Self {
+            kind: ToastKind::Failed,
+            headline: headline.to_owned(),
+            body: body.to_owned(),
+            footer,
+            raised_at: Instant::now(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DebugRecord {
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -105,6 +177,11 @@ pub struct DebugRecord {
     pub output: String,
     pub timings: Timings,
     pub failure: Option<Failure>,
+    /// A remark about an outcome that is neither an insertion nor a failure,
+    /// in plain language. The one case today is a dictation that could not be
+    /// decoded, where the numbers behind the decision are the only thing
+    /// worth keeping.
+    pub note: Option<String>,
     /// How the text got where it was going, for the dictations that succeeded.
     /// Absent on a failure, where nothing was inserted at all.
     pub insertion: Option<Insertion>,
@@ -169,6 +246,10 @@ pub struct AppState {
     /// capsule returns to Ready 1.4s later, so the timer belongs with the
     /// result it describes.
     pub done_at: Option<Instant>,
+    /// What to say about words that went to the clipboard rather than to the
+    /// cursor, if anything. At most one: a toast describes the last
+    /// dictation, and there is only ever one of those.
+    pub toast: Option<Toast>,
 }
 
 impl Default for AppState {
@@ -193,6 +274,7 @@ impl Default for AppState {
             settings_write_error: None,
             processing_since: None,
             done_at: None,
+            toast: None,
         }
     }
 }
@@ -208,6 +290,7 @@ impl AppState {
         self.last_failure = None;
         self.processing_since = None;
         self.done_at = None;
+        self.toast = None;
     }
 
     /// Forgets the last dictation's text and timings without touching the
@@ -263,7 +346,19 @@ impl AppState {
     pub fn record_inserted(&mut self, insertion: Insertion) {
         self.hud = match insertion {
             Insertion::Pasted => HudState::Done,
-            Insertion::CopiedOnly => HudState::Copied,
+            Insertion::CopiedOnly | Insertion::CopiedNoField => HudState::Copied,
+        };
+        // Only the two clipboard endings say anything. A dictation that
+        // landed at the cursor needs no announcement: the user is watching
+        // their own words appear.
+        self.toast = match insertion {
+            Insertion::Pasted => None,
+            Insertion::CopiedOnly => {
+                Some(Toast::copied("Destination changed", &self.output))
+            }
+            Insertion::CopiedNoField => {
+                Some(Toast::copied("No text field focused", &self.output))
+            }
         };
         self.push_history(None, Some(insertion));
         self.settle();
@@ -272,8 +367,28 @@ impl AppState {
     /// Files a failure: the capsule shows it, the console keeps it, and the
     /// dot points at the console unless the console is already the thing the
     /// user is looking at.
-    pub fn record_failure(&mut self, failure: Failure) {
+    pub fn record_failure(&mut self, failure: Failure, preserved: Option<Preserved>) {
         self.hud = HudState::Error;
+        // Raised before the fields are cleared, and from whichever of them
+        // the clipboard actually holds: a toast that showed the processed
+        // text while the clipboard held the raw transcription would describe
+        // words the user is not about to paste.
+        self.toast = match &preserved {
+            Some(Preserved::Processed) => Some(Toast::failed(
+                failure.headline,
+                &self.output,
+                "Copied to clipboard · ⌘V · details in the console",
+            )),
+            Some(Preserved::Raw) => Some(Toast::failed(
+                failure.headline,
+                &self.transcript,
+                "Raw transcript copied · ⌘V · details in the console",
+            )),
+            // Nothing was kept, so there is nothing to tell the user to
+            // paste. Saying so here would send them to press Cmd-V for
+            // whatever happened to be on the clipboard already.
+            Some(Preserved::Unavailable(_)) | None => None,
+        };
         if !self.console_open {
             self.unread_failure = true;
         }
@@ -288,7 +403,30 @@ impl AppState {
         self.settle();
     }
 
+    /// Files a dictation that was heard and not understood.
+    ///
+    /// Told to the user rather than swallowed, unlike silence: they spoke,
+    /// and what they said was discarded. It is still not a failure, so it
+    /// neither raises the unread dot nor paints the capsule red.
+    pub fn record_not_understood(&mut self, note: String) {
+        self.hud = HudState::NotUnderstood;
+        // Whatever Whisper decoded was not speech, so none of it is filed
+        // against this dictation as though it had been.
+        self.clear_result();
+        self.push_history_with(None, None, Some(note));
+        self.settle();
+    }
+
     pub fn push_history(&mut self, failure: Option<Failure>, insertion: Option<Insertion>) {
+        self.push_history_with(failure, insertion, None);
+    }
+
+    fn push_history_with(
+        &mut self,
+        failure: Option<Failure>,
+        insertion: Option<Insertion>,
+        note: Option<String>,
+    ) {
         self.history.insert(
             0,
             DebugRecord {
@@ -298,6 +436,7 @@ impl AppState {
                 output: self.output.clone(),
                 timings: self.timings.clone(),
                 failure,
+                note,
                 insertion,
             },
         );
@@ -322,6 +461,16 @@ impl AppState {
     fn settle(&mut self) {
         self.processing_since = None;
         self.done_at = Some(Instant::now());
+    }
+
+    /// Take the toast away once it has been up long enough to read.
+    ///
+    /// Its own clock rather than the capsule's: the capsule retires a single
+    /// word, and this retires a sentence of the user's own speech.
+    pub fn retire_toast(&mut self, after: Duration) {
+        if self.toast.as_ref().is_some_and(|toast| toast.raised_at.elapsed() >= after) {
+            self.toast = None;
+        }
     }
 
     /// Opening the console is the acknowledgement, so it is the one place the
@@ -433,7 +582,7 @@ mod tests {
             timings: Timings { audio_ms: Some(1840), ..Default::default() },
             ..Default::default()
         };
-        state.record_failure(Failure::blocked("No text field focused", "detail"));
+        state.record_failure(Failure::blocked("No text field focused", "detail"), None);
         let record = &state.history[0];
         assert!(record.transcript.is_empty() && record.output.is_empty());
         assert!(record.route.is_none());
@@ -460,7 +609,7 @@ mod tests {
     #[test]
     fn a_dropped_failure_keeps_the_transcript_it_did_get() {
         let mut state = AppState { transcript: "half a sentence".into(), ..Default::default() };
-        state.record_failure(Failure::dropped("Couldn't insert", "Target application changed"));
+        state.record_failure(Failure::dropped("Couldn't insert", "Target application changed"), None);
         assert_eq!(state.history[0].transcript, "half a sentence");
     }
 
@@ -469,7 +618,7 @@ mod tests {
     #[test]
     fn a_failure_raised_while_the_console_is_open_does_not_set_the_dot() {
         let mut state = AppState { console_open: true, ..Default::default() };
-        state.record_failure(Failure::dropped("Transcription failed", "worker died"));
+        state.record_failure(Failure::dropped("Transcription failed", "worker died"), None);
         assert!(!state.unread_failure);
     }
 
@@ -533,6 +682,28 @@ mod tests {
         assert!(!state.unread_failure, "nothing failed, so nothing is unread");
     }
 
+    /// Being misheard is not silence and it is not a failure. The user spoke,
+    /// the words were discarded, and the app used to answer that with the
+    /// same quiet nothing it gives a press that held no speech: the capsule
+    /// sat on Transcribing and then went back to Ready with no text, no
+    /// clipboard and no explanation.
+    #[test]
+    fn a_dictation_that_could_not_be_decoded_says_so_and_files_it() {
+        let mut state = AppState { transcript: "garbage".into(), ..Default::default() };
+        state.record_not_understood("2.8 s of audio, confidence -7.89".into());
+        assert_eq!(state.hud, HudState::NotUnderstood);
+        assert!(state.last_failure.is_none(), "not understanding is not a failure");
+        assert!(!state.unread_failure, "and it does not raise the unread dot");
+        assert!(state.toast.is_none(), "there is no text to tell the user to paste");
+        assert_eq!(
+            state.history[0].note.as_deref(),
+            Some("2.8 s of audio, confidence -7.89"),
+            "the console keeps the numbers, which are the only way to tune the floor"
+        );
+        assert!(state.history[0].transcript.is_empty(), "whatever it decoded was not speech");
+        assert!(state.done_at.is_some(), "the capsule has to settle back to Ready");
+    }
+
     /// The dot outlives the capsule, so a failure the user has not opened the
     /// console for must survive them pressing the key and saying nothing.
     #[test]
@@ -561,16 +732,115 @@ mod tests {
         assert_eq!(AppState::default().console_tab, ConsoleTab::Activity);
     }
 
+    /// The capsule says "Copied" for 1.4s, and this state only happens
+    /// because the paste could not go where the user was pointing, which is
+    /// precisely when they are least likely to be watching a small widget in
+    /// the corner. The toast is what actually reaches them.
+    #[test]
+    fn a_dictation_copied_because_nothing_was_focused_announces_itself() {
+        let mut state = AppState { output: "The finished text.".into(), ..Default::default() };
+        state.record_inserted(Insertion::CopiedNoField);
+        let toast = state.toast.as_ref().expect("the user has to be told where their words went");
+        assert_eq!(toast.headline, "No text field focused");
+        assert_eq!(toast.body, "The finished text.");
+        assert_eq!(toast.kind, ToastKind::Copied);
+    }
+
+    /// Red means the user lost something. A dictation that reached the
+    /// clipboard lost nothing: it is a success that needs a Cmd-V, and
+    /// painting it as a failure taught the user to read the error state as
+    /// noise. Both clipboard endings are checked, because they arrive from
+    /// different places and only share this if something keeps them together.
+    #[test]
+    fn a_dictation_that_reached_the_clipboard_is_never_painted_as_an_error() {
+        for insertion in [Insertion::CopiedOnly, Insertion::CopiedNoField] {
+            let mut state = AppState { output: "words".into(), ..Default::default() };
+            state.record_inserted(insertion);
+            assert_eq!(state.hud, HudState::Copied, "{insertion:?} is not an error state");
+            assert!(state.last_failure.is_none(), "{insertion:?} left a failure behind");
+            assert!(!state.unread_failure, "{insertion:?} raised the unread dot");
+            assert_eq!(state.toast.as_ref().unwrap().kind, ToastKind::Copied);
+        }
+    }
+
+    /// A dictation that landed at the cursor needs no announcement: the user
+    /// is looking at their own words appearing.
+    #[test]
+    fn an_ordinary_paste_says_nothing() {
+        let mut state = AppState { output: "The finished text.".into(), ..Default::default() };
+        state.record_inserted(Insertion::Pasted);
+        assert!(state.toast.is_none());
+    }
+
+    /// Raw text is never described as though it had been processed. The
+    /// clipboard holds the transcription, so the toast has to show that and
+    /// not the output field, which still holds whatever processing managed
+    /// before it failed.
+    #[test]
+    fn a_failure_that_kept_the_raw_transcript_shows_the_transcript() {
+        let mut state = AppState {
+            transcript: "what I actually said".into(),
+            output: "half rewritten".into(),
+            ..Default::default()
+        };
+        state.record_failure(
+            Failure::dropped("Rewriting failed", "the worker stopped"),
+            Some(Preserved::Raw),
+        );
+        let toast = state.toast.as_ref().expect("the words survived, so say where");
+        assert_eq!(toast.headline, "Rewriting failed");
+        assert_eq!(toast.body, "what I actually said");
+        assert_eq!(toast.kind, ToastKind::Failed);
+    }
+
+    /// A toast that says the words are on the clipboard when they are not is
+    /// worse than silence: it sends the user to press Cmd-V for nothing.
+    #[test]
+    fn a_failure_that_could_not_keep_anything_raises_no_toast() {
+        let mut state = AppState { transcript: "gone".into(), ..Default::default() };
+        state.record_failure(
+            Failure::dropped("Transcription failed", "the worker stopped"),
+            Some(Preserved::Unavailable("Could not access macOS pasteboard".into())),
+        );
+        assert!(state.toast.is_none());
+    }
+
+    /// Pressing the key again is the user moving on. A toast about the last
+    /// dictation hanging over the next one would describe the wrong words.
+    #[test]
+    fn a_new_recording_takes_the_toast_with_it() {
+        let mut state = AppState { output: "old words".into(), ..Default::default() };
+        state.record_inserted(Insertion::CopiedOnly);
+        assert!(state.toast.is_some());
+        state.reset_for_recording();
+        assert!(state.toast.is_none());
+    }
+
+    /// The toast retires on its own clock rather than on the capsule's: it
+    /// carries more to read than a one word label does.
+    #[test]
+    fn a_toast_retires_once_its_time_is_up() {
+        let mut state = AppState { output: "words".into(), ..Default::default() };
+        state.record_inserted(Insertion::CopiedOnly);
+        state.retire_toast(Duration::from_secs(60));
+        assert!(state.toast.is_some(), "still well within its time");
+        state.retire_toast(Duration::ZERO);
+        assert!(state.toast.is_none());
+    }
+
     /// A settings file that could not be read has to reach the user. It is
     /// recorded as a failure so the unread dot points at the console, the
     /// same way every other startup problem is surfaced.
     #[test]
     fn an_unreadable_settings_file_is_reported_like_any_other_startup_problem() {
         let mut state = AppState::default();
-        state.record_failure(Failure::blocked(
-            "Settings unreadable",
-            "Could not read /tmp/settings.json: expected value at line 1 column 3",
-        ));
+        state.record_failure(
+            Failure::blocked(
+                "Settings unreadable",
+                "Could not read /tmp/settings.json: expected value at line 1 column 3",
+            ),
+            None,
+        );
         assert!(state.unread_failure);
         assert!(state.history[0]
             .failure

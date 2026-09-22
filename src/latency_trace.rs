@@ -99,13 +99,67 @@ pub fn app_failure<'a>(
     }
 }
 
+/// A capture the app refused before it became a dictation.
+///
+/// Numbers only, and by construction: nothing was transcribed, so there is
+/// nothing here that could carry what the user said. It is recorded at all
+/// because a floor that silently discards presses has to be reviewable
+/// against the presses it discarded.
+#[derive(serde::Serialize)]
+struct Silence {
+    captured_at: String,
+    outcome: &'static str,
+    failing_stage: &'static str,
+    audio_seconds: f64,
+    rms: f32,
+    /// The loudest window, recorded beside the mean that decided. It is here
+    /// to be compared against, not acted on.
+    peak_rms: f32,
+}
+
+fn silence(seconds: f64, rms: f32, peak: f32) -> Silence {
+    Silence {
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        outcome: "no_speech",
+        failing_stage: "capture",
+        audio_seconds: (seconds * 1000.0).round() / 1000.0,
+        rms,
+        peak_rms: peak,
+    }
+}
+
+/// Append a refused capture, if there is somewhere to put it.
+pub fn record_silence(seconds: f64, rms: f32, peak: f32) {
+    append(&silence(seconds, rms, peak));
+}
+
+/// Append a capture the floor let through.
+///
+/// The counterpart of the refusals. A floor can only be judged against both
+/// sides of it: what it turned away says nothing about what it should have.
+pub fn record_capture(seconds: f64, rms: f32, peak: f32) {
+    append(&Silence {
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        outcome: "captured",
+        failing_stage: "capture",
+        audio_seconds: (seconds * 1000.0).round() / 1000.0,
+        rms,
+        peak_rms: peak,
+    });
+}
+
 /// Append an app-side failure, if there is somewhere to put it.
 pub fn record_app_failure(stage: &'static str, failure: &crate::state::Failure) {
+    append(&app_failure(stage, failure));
+}
+
+/// Write one record to the app's own trace, if there is somewhere to put it.
+fn append(record: &impl serde::Serialize) {
     let Ok(root) = crate::router::research_root() else {
         return;
     };
     let path = root.join("data").join("shadow").join("localflow_traces.jsonl");
-    let Ok(line) = serde_json::to_string(&app_failure(stage, failure)) else {
+    let Ok(line) = serde_json::to_string(record) else {
         return;
     };
     if let Some(parent) = path.parent() {

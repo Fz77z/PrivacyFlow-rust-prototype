@@ -272,6 +272,9 @@ fn paint_label_and_icon(
                 // Muted, like Ready: nothing was said, so nothing happened,
                 // and the capsule should not announce it as though it had.
                 HudState::NoSpeech => ("No speech", theme::MUTED),
+                // Not muted, unlike silence: the user spoke and their words
+                // were discarded, which they are entitled to notice.
+                HudState::NotUnderstood => ("Didn't catch that", theme::LABEL),
                 HudState::Error => ("Ready", theme::MUTED),
             };
             painter.text(

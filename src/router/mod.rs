@@ -53,6 +53,13 @@ pub struct InferenceResult {
 pub enum Reply {
     Transcribed(InferenceResult),
     NoSpeech,
+    /// Speech was heard and could not be decoded. Distinct from silence
+    /// because the user did say something and it was thrown away, and it
+    /// carries the numbers behind that so the console can show them.
+    Unintelligible {
+        seconds: f64,
+        confidence: f64,
+    },
     /// The utterance failed after the worker had already recognised speech.
     /// It carries the transcript so the words can be preserved rather than
     /// lost: routing, rewriting and the safety guards can all refuse without
@@ -217,6 +224,9 @@ struct Response {
     processing_ms: Option<f64>,
     error: Option<String>,
     no_speech: Option<bool>,
+    unintelligible: Option<bool>,
+    audio_seconds: Option<f64>,
+    avg_logprob: Option<f64>,
 }
 
 /// Turn one worker reply into the result the pipeline inserts.
@@ -239,6 +249,16 @@ fn parse_response(line: &str) -> Result<Reply> {
     // nothing was said carries none of the fields a transcript must have.
     if response.no_speech == Some(true) {
         return Ok(Reply::NoSpeech);
+    }
+    // Checked in the same place and for the same reason: a reply that says
+    // the decode was not speech carries none of the fields a transcript must
+    // have. The numbers default to zero rather than refusing the reply: the
+    // answer is what matters, and the figures only decorate the console.
+    if response.unintelligible == Some(true) {
+        return Ok(Reply::Unintelligible {
+            seconds: response.audio_seconds.unwrap_or_default(),
+            confidence: response.avg_logprob.unwrap_or_default(),
+        });
     }
 
     // A processor name is what distinguishes a rewritten route from a
@@ -452,6 +472,26 @@ mod tests {
             parse_response(r#"{"no_speech": true}"#).unwrap(),
             Reply::NoSpeech
         ));
+    }
+
+    /// Silence and an unintelligible decode are different answers and must
+    /// not arrive as the same one. Nothing was said is a non-event; a
+    /// dictation Whisper could not decode threw the user's words away, and
+    /// the numbers behind that are what the console shows them.
+    #[test]
+    fn an_unintelligible_decode_is_its_own_reply_not_silence() {
+        let reply = parse_response(
+            r#"{"unintelligible": true, "audio_seconds": 2.763, "avg_logprob": -7.8905}"#,
+        )
+        .unwrap();
+        match reply {
+            Reply::Unintelligible { seconds, confidence } => {
+                assert_eq!(seconds, 2.763);
+                assert_eq!(confidence, -7.8905);
+            }
+            other => panic!("expected an unintelligible reply, got {other:?}"),
+        }
+        assert!(matches!(parse_response(r#"{"no_speech": true}"#).unwrap(), Reply::NoSpeech));
     }
 
     /// A reply that carries an error is a failure whatever else it says, so

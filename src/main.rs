@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod insertion;
 mod instance;
 mod latency_trace;
 mod platform;
@@ -62,6 +63,19 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport,
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            // Stated here rather than left to the bundle's LSUIElement. winit
+            // honours that key only when it can see a bundle identifier, and
+            // forces the Regular policy when it cannot, so a binary run
+            // straight out of target/ would take a Dock icon and a slot in
+            // the application switcher while the installed app does not.
+            //
+            // Accessory, not Prohibited: the console is an ordinary window
+            // that has to be able to take focus and keystrokes, which a
+            // prohibited application cannot do.
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })),
         ..Default::default()
     };
     eframe::run_native(

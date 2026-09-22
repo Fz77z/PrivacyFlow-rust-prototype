@@ -219,6 +219,113 @@ fn requested_buffer_size(supported: &SupportedBufferSize) -> BufferSize {
     }
 }
 
+/// The floor below which a capture holds no speech.
+///
+/// These are the worker's own numbers, from
+/// `localflow-research/src/dictation_router/asr.py` (`SILENCE_RMS`,
+/// `MIN_SECONDS`), and a test compares the two against that file rather than
+/// trusting this comment.
+///
+/// The policy is deliberately held in both places. This copy is the fast
+/// answer: a press with nothing in it is refused here, before a file is
+/// written or the worker is spoken to, so the capsule never flashes
+/// "Transcribing" to tell the user that nothing happened. The worker keeps
+/// its own because it is a separate program that must not trust whatever it
+/// is handed: Whisper answers silence with an invented sentence, and that
+/// safety net is what caught the invention in the first place.
+pub const SILENCE_RMS: f32 = 0.0017;
+pub const MIN_SECONDS: f64 = 0.35;
+
+/// The span the loudest-moment measurement is taken over.
+///
+/// Speech is bursty and silence is not, so the strongest short window
+/// separates them far more sharply than one mean over the whole capture,
+/// which reads a dictation with thinking pauses as quiet and a silent capture
+/// with one door slam as loud.
+///
+/// It does not decide anything yet. It is recorded beside the mean that does,
+/// because a threshold for it has to come from its own spread rather than
+/// from numbers measured a different way.
+pub const WINDOW_SECONDS: f64 = 0.1;
+
+/// What a finished capture turned out to be.
+///
+/// An energy gate, not a speech detector. It answers "is there anything here
+/// at all", and anything above the floor goes to the worker: spending ASR
+/// time on noise costs a second, and refusing quiet speech costs the user
+/// their words.
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Speech { rms: f32, peak: f32 },
+    TooQuiet { seconds: f64, rms: f32, peak: f32 },
+}
+
+/// Measure a drained capture.
+///
+/// The sum is accumulated in f64 for the same reason the worker does it: a
+/// f32 mean over millions of squared samples loses enough precision to move
+/// the decision.
+pub fn verdict(samples: &[f32], sample_rate: u32) -> Verdict {
+    let seconds = samples.len() as f64 / sample_rate as f64;
+    let rms = root_mean_square(samples);
+    let peak = loudest_window(samples, sample_rate);
+    if seconds < MIN_SECONDS || rms < SILENCE_RMS {
+        return Verdict::TooQuiet { seconds, rms, peak };
+    }
+    Verdict::Speech { rms, peak }
+}
+
+/// The verdict for a capture that arrives as two runs of samples, which is
+/// how a ring buffer hands back something that wrapped.
+///
+/// Measured as one capture rather than as two, so the answer does not depend
+/// on where in the ring the recording happened to start.
+fn measure(first: &[f32], second: &[f32], sample_rate: u32) -> Verdict {
+    if second.is_empty() {
+        return verdict(first, sample_rate);
+    }
+    let mut joined = Vec::with_capacity(first.len() + second.len());
+    joined.extend_from_slice(first);
+    joined.extend_from_slice(second);
+    verdict(&joined, sample_rate)
+}
+
+fn root_mean_square(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_squares: f64 = samples.iter().map(|sample| *sample as f64 * *sample as f64).sum();
+    (sum_squares / samples.len() as f64).sqrt() as f32
+}
+
+/// The energy of the loudest short window in the capture.
+///
+/// Windows do not overlap, which can split a burst across two of them and
+/// read each half. Speech lasts far longer than one window, so the strongest
+/// window of a real dictation is well inside a syllable rather than on its
+/// edge, and the extra bookkeeping of a sliding window buys nothing here.
+///
+/// A capture shorter than one window is measured whole, so the answer is
+/// always about the same thing: the loudest part of what was recorded.
+fn loudest_window(samples: &[f32], sample_rate: u32) -> f32 {
+    let window = (WINDOW_SECONDS * sample_rate as f64).round() as usize;
+    if window == 0 || samples.len() <= window {
+        return root_mean_square(samples);
+    }
+    samples
+        .chunks(window)
+        .map(root_mean_square)
+        .fold(0.0f32, f32::max)
+}
+
+/// What became of a finished capture.
+pub enum Finished {
+    /// Written to disk, ready for the worker.
+    Recorded(RecordedAudio),
+    /// Below the floor, so nothing was written at all.
+    TooQuiet { seconds: f64, rms: f32, peak: f32 },
+}
+
 /// A finished recording that has not been drained or encoded yet.
 pub struct CapturedAudio {
     samples: Arc<Mutex<Consumer<f32>>>,
@@ -229,9 +336,59 @@ pub struct CapturedAudio {
 }
 
 impl CapturedAudio {
-    /// Drain the capture buffer into a mono 16-bit WAV, which is the only
-    /// format the inference worker accepts.
-    pub fn write_wav(self, dir: &Path) -> Result<RecordedAudio> {
+    /// Measure the capture without consuming it.
+    ///
+    /// Taken on the UI thread the instant the hotkey comes up, because a
+    /// press that held no speech must be answered there and then. Sending it
+    /// to the pipeline thread to find out puts it behind whatever that thread
+    /// is doing, and that thread spends most of its time inside a worker call
+    /// for the previous dictation: one capture in this log waited seven
+    /// seconds to be told it was empty.
+    ///
+    /// Reading the ring without committing is what keeps this free of
+    /// consequence. A capture that turns out to be real is still whole
+    /// afterwards, and is drained and written on the pipeline thread exactly
+    /// as before.
+    pub fn inspect(&self) -> Result<Verdict> {
+        let mut samples = self
+            .samples
+            .lock()
+            .map_err(|_| anyhow!("The audio buffer lock was poisoned"))?;
+        let waiting = samples.slots();
+        let Ok(chunk) = samples.read_chunk(waiting) else {
+            return Ok(verdict(&[], self.sample_rate));
+        };
+        // The ring wraps, so what was recorded can arrive as two runs of
+        // samples. Both are measured; neither is copied.
+        let (first, second) = chunk.as_slices();
+        Ok(measure(first, second, self.sample_rate))
+    }
+
+    /// Throw away a capture that held no speech.
+    ///
+    /// Left in the ring, its samples would be prepended to whatever the user
+    /// says next: `start_recording` clears the buffer, but a capture is only
+    /// ever cleared by being taken, and this one is never taken.
+    pub fn discard(self) -> Result<()> {
+        let mut samples = self
+            .samples
+            .lock()
+            .map_err(|_| anyhow!("The audio buffer lock was poisoned"))?;
+        let waiting = samples.slots();
+        if let Ok(chunk) = samples.read_chunk(waiting) {
+            chunk.commit_all();
+        }
+        Ok(())
+    }
+
+    /// Drain the capture buffer, and write it as the mono 16-bit WAV the
+    /// inference worker accepts - unless there is nothing in it.
+    ///
+    /// Measured before anything is written, because the samples are already
+    /// in hand here and everything after this point costs a file, an IPC
+    /// round trip and a visible state change to answer a press that held no
+    /// speech.
+    pub fn finish(self, dir: &Path) -> Result<Finished> {
         let mut samples = self
             .samples
             .lock()
@@ -243,17 +400,31 @@ impl CapturedAudio {
         drop(samples);
 
         let duration = Duration::from_secs_f64(mono.len() as f64 / self.sample_rate as f64);
+        let (measured, peak) = match verdict(&mono, self.sample_rate) {
+            Verdict::TooQuiet { seconds, rms, peak } => {
+                return Ok(Finished::TooQuiet { seconds, rms, peak })
+            }
+            Verdict::Speech { rms, peak } => (rms, peak),
+        };
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
             "utterance-{}.wav",
             chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
         ));
         write_wav(&path, &mono, self.sample_rate, 1)?;
-        Ok(RecordedAudio { path, duration })
+        Ok(Finished::Recorded(RecordedAudio { path, duration, rms: measured, peak }))
     }
 }
 
 pub struct RecordedAudio {
+    /// The energy of the capture that was accepted, as the mean that decided
+    /// it and as the loudest window that may come to.
+    ///
+    /// Kept because a floor can only be set from the captures it let through,
+    /// not only from the ones it turned away. Numbers, never anything the
+    /// user said.
+    pub rms: f32,
+    pub peak: f32,
     pub path: PathBuf,
     pub duration: Duration,
 }
@@ -308,6 +479,161 @@ fn write_wav(path: &Path, samples: &[f32], sample_rate: u32, channels: u16) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Samples at a steady amplitude, which is all the energy gate measures.
+    fn tone(seconds: f64, amplitude: f32, rate: u32) -> Vec<f32> {
+        let frames = (seconds * rate as f64) as usize;
+        (0..frames)
+            .map(|n| amplitude * (n as f32 * 0.2).sin())
+            .collect()
+    }
+
+    /// The case that prompted this: tap the key and let go. There is nothing
+    /// there to transcribe, and finding that out used to cost a file, an IPC
+    /// round trip and a flash of "Transcribing".
+    #[test]
+    fn a_tap_of_the_key_is_answered_without_looking_at_the_audio_further() {
+        let samples = tone(0.08, 0.4, 16_000);
+        assert!(matches!(verdict(&samples, 16_000), Verdict::TooQuiet { .. }));
+    }
+
+    /// Short and loud is still short. A fragment below the floor is not a
+    /// dictation, however much energy it carries.
+    #[test]
+    fn a_burst_of_noise_too_short_to_be_speech_is_refused() {
+        let samples = tone(0.2, 0.9, 16_000);
+        match verdict(&samples, 16_000) {
+            Verdict::TooQuiet { seconds, .. } => assert!(seconds < MIN_SECONDS),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Long enough, and silent. Whisper answers silence with an invented
+    /// sentence, so this must never reach it.
+    #[test]
+    fn a_long_but_silent_capture_is_refused() {
+        let samples = vec![0.0f32; 16_000 * 3];
+        match verdict(&samples, 16_000) {
+            Verdict::TooQuiet { rms, .. } => assert!(rms < SILENCE_RMS),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The failure that matters most. Rejecting quiet speech loses words the
+    /// user actually said, which is worse than spending ASR time on noise, so
+    /// anything above the floor goes on to the worker.
+    #[test]
+    fn quiet_speech_just_above_the_floor_is_still_a_dictation() {
+        let samples = tone(1.0, SILENCE_RMS as f32 * 4.0, 16_000);
+        assert!(matches!(verdict(&samples, 16_000), Verdict::Speech { .. }));
+    }
+
+    #[test]
+    fn ordinary_speech_is_unaffected() {
+        let samples = tone(2.0, 0.3, 16_000);
+        assert!(matches!(verdict(&samples, 16_000), Verdict::Speech { .. }));
+    }
+
+    /// The whole point of measuring here: a press with nothing in it must
+    /// cost nothing. No file on disk means no WAV to clean up, and it is also
+    /// what proves the worker was never involved, since the worker is only
+    /// ever handed a path.
+    #[test]
+    fn a_refused_capture_writes_no_file_at_all() {
+        let dir = std::env::temp_dir().join(format!("localflow-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let silence = vec![0.0f32; 16_000];
+        let (mut producer, consumer) = RingBuffer::new(silence.len());
+        for sample in &silence {
+            producer.push(*sample).unwrap();
+        }
+        let captured = CapturedAudio {
+            samples: Arc::new(Mutex::new(consumer)),
+            sample_rate: 16_000,
+            truncated: false,
+        };
+
+        let finished = captured.finish(&dir).unwrap();
+        assert!(matches!(finished, Finished::TooQuiet { .. }));
+        assert!(!dir.exists(), "a refused capture created the audio directory");
+    }
+
+    fn captured(samples: &[f32], rate: u32) -> CapturedAudio {
+        let (mut producer, consumer) = RingBuffer::new(samples.len().max(1));
+        for sample in samples {
+            producer.push(*sample).unwrap();
+        }
+        CapturedAudio {
+            samples: Arc::new(Mutex::new(consumer)),
+            sample_rate: rate,
+            truncated: false,
+        }
+    }
+
+    /// The verdict has to exist the moment the key comes up, so it is taken
+    /// without consuming the capture: a dictation that turns out to be real
+    /// must still be there to be written afterwards.
+    #[test]
+    fn inspecting_a_capture_leaves_every_sample_in_place() {
+        let speech = tone(1.0, 0.3, 16_000);
+        let capture = captured(&speech, 16_000);
+
+        assert!(matches!(capture.inspect().unwrap(), Verdict::Speech { .. }));
+        assert!(matches!(capture.inspect().unwrap(), Verdict::Speech { .. }));
+
+        let dir = std::env::temp_dir().join(format!("localflow-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        match capture.finish(&dir).unwrap() {
+            Finished::Recorded(audio) => {
+                let reader = hound::WavReader::open(&audio.path).unwrap();
+                assert_eq!(
+                    reader.len() as usize,
+                    speech.len(),
+                    "inspecting the capture ate part of the dictation"
+                );
+            }
+            Finished::TooQuiet { .. } => panic!("a real dictation was refused"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused capture is thrown away where it lies. Left in the ring, its
+    /// samples would be prepended to whatever the user says next.
+    #[test]
+    fn discarding_a_refused_capture_empties_the_buffer() {
+        let capture = captured(&vec![0.0f32; 16_000], 16_000);
+        assert!(matches!(capture.inspect().unwrap(), Verdict::TooQuiet { .. }));
+        let buffer = capture.samples.clone();
+        capture.discard().unwrap();
+        assert_eq!(buffer.lock().unwrap().slots(), 0);
+    }
+
+    /// The floor is one policy applied in two programs, and the app's copy is
+    /// only a fast answer if it agrees with the worker's. They are compared
+    /// against the worker's own source rather than against a number repeated
+    /// in a comment here, which would drift without anything noticing.
+    #[test]
+    fn the_app_and_the_worker_hold_the_same_floor() {
+        let Ok(root) = crate::router::research_root() else {
+            eprintln!("skipped: the research repository is not beside this one");
+            return;
+        };
+        let source = root.join("src").join("dictation_router").join("asr.py");
+        let Ok(text) = std::fs::read_to_string(&source) else {
+            eprintln!("skipped: {} is not readable", source.display());
+            return;
+        };
+        let constant = |name: &str| -> f64 {
+            text.lines()
+                .find_map(|line| line.strip_prefix(&format!("{name} = ")))
+                .unwrap_or_else(|| panic!("{name} is no longer defined in asr.py"))
+                .trim()
+                .parse()
+                .expect("the worker's floor must be a number")
+        };
+        assert_eq!(constant("SILENCE_RMS") as f32, SILENCE_RMS);
+        assert_eq!(constant("MIN_SECONDS"), MIN_SECONDS);
+    }
 
     #[test]
     fn callback_downmixes_without_a_mutex() {

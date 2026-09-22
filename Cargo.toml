@@ -24,6 +24,10 @@ objc2 = "0.6"
 # Same version eframe resolves to, so CreationContext's HasWindowHandle is
 # the trait this uses to reach the capsule's NSView.
 raw-window-handle = "0.6"
+# Same version eframe resolves to, so this reaches the very event loop eframe
+# builds rather than a second copy of winit. Used only to declare the
+# accessory activation policy.
+winit = "0.30"
 objc2-foundation = { version = "0.3", features = ["NSThread"] }
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSWindow", "NSResponder", "NSEvent", "NSScreen", "NSView", "libc"] }
 

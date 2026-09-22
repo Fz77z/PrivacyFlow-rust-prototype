@@ -62,6 +62,15 @@ fn activity(ui: &mut Ui, state: &AppState) {
                     ui.label(
                         RichText::new(record.timestamp.format("%H:%M:%S").to_string()).strong(),
                     );
+                    // A dictation that was heard and not understood has no
+                    // transcript, route, output or timings to show. The whole
+                    // of what is known about it is the remark, so the card is
+                    // that remark rather than a form of empty fields.
+                    if let Some(note) = &record.note {
+                        ui.add_space(5.0);
+                        ui.colored_label(theme::MUTED, note);
+                        return;
+                    }
                     ui.add_space(5.0);
                     ui.label(RichText::new("ASR").small().strong());
                     ui.monospace(&record.transcript);
@@ -84,18 +93,13 @@ fn activity(ui: &mut Ui, state: &AppState) {
                         opt_ms(record.timings.insert_ms),
                         opt_ms(record.timings.total_ms),
                     ));
-                    // The capsule says "Copied" for 1400 ms and then returns
-                    // to Ready. That state only happens because the user
-                    // switched away, so the one moment they are guaranteed not
-                    // to be watching the capsule was the only moment this was
-                    // said. The durable record has to carry it.
-                    if record.insertion == Some(crate::platform::Insertion::CopiedOnly) {
+                    // Both the capsule's "Copied" and the toast that goes
+                    // with it are gone within seconds, and they appear
+                    // precisely when the text did not land where the user was
+                    // looking. The durable record has to carry the reason.
+                    if let Some(why) = why_copied(record.insertion) {
                         ui.add_space(5.0);
-                        ui.colored_label(
-                            theme::MUTED,
-                            "Copied to the clipboard, not pasted: the destination app was \
-                             no longer frontmost.",
-                        );
+                        ui.colored_label(theme::MUTED, why);
                     }
                     // The console keeps the original message, whatever the
                     // capsule had room to say.
@@ -107,6 +111,22 @@ fn activity(ui: &mut Ui, state: &AppState) {
             ui.add_space(8.0);
         }
     });
+}
+
+/// Why a dictation was left on the clipboard, for the two endings where it
+/// was, and nothing for the one where it reached the cursor.
+fn why_copied(insertion: Option<crate::platform::Insertion>) -> Option<&'static str> {
+    match insertion? {
+        crate::platform::Insertion::Pasted => None,
+        crate::platform::Insertion::CopiedOnly => Some(
+            "Copied to the clipboard, not pasted: the destination app was no longer \
+             frontmost.",
+        ),
+        crate::platform::Insertion::CopiedNoField => Some(
+            "Copied to the clipboard, not pasted: the destination app had no text field \
+             focused to receive it.",
+        ),
+    }
 }
 
 /// One setting. The tab is thin because LocalFlow has one thing to configure,

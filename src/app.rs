@@ -1,9 +1,10 @@
 use crate::audio::{CapturedAudio, Microphone};
+use crate::insertion::CursorMemory;
 use crate::platform::{
-    frontmost_application_pid, insert_text, GlobalHotkey, HotkeyEvent, Insertion,
+    frontmost_application_pid, insert_text, CursorMoved, GlobalHotkey, HotkeyEvent, Insertion,
 };
 use crate::router::{KevWorker, Reply, WorkerShutdown};
-use crate::state::{AppState, Failure, HudState, Route, Timings, WorkerStatus};
+use crate::state::{AppState, Failure, HudState, Preserved, Route, Timings, WorkerStatus};
 use crate::ui;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -71,6 +72,41 @@ impl CaptureEnd {
     }
 }
 
+/// Where a finished dictation is going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    /// Into this process, if what it has focused will take text.
+    Insert(i32),
+    /// Onto the clipboard, because nothing was focused that could receive it.
+    /// Not a failure: the user spoke, the words came back, and they are one
+    /// Cmd-V from where they were wanted.
+    Clipboard,
+    /// Nowhere, because the capture ended before the user had finished
+    /// speaking. The words that were caught are still preserved, but this is
+    /// reported as the lost dictation it is.
+    Lost,
+}
+
+/// What to do with a finished dictation, given where it was aimed and how its
+/// capture ended.
+///
+/// The two reasons a dictation does not get pasted are deliberately kept
+/// apart. Having nowhere to put the text is an ordinary thing that happens
+/// when the user dictates with LocalFlow's own window in front, or with
+/// nothing focused at all, and refusing it was worse than answering it. A
+/// capture cut short by the ceiling or the buffer is a dictation the user did
+/// not finish, and calling that a success would claim something LocalFlow did
+/// not do.
+fn destination(target_pid: Option<i32>, capture_end: CaptureEnd) -> Destination {
+    if !capture_end.may_insert() {
+        return Destination::Lost;
+    }
+    match target_pid {
+        Some(pid) => Destination::Insert(pid),
+        None => Destination::Clipboard,
+    }
+}
+
 struct WorkItem {
     captured: CapturedAudio,
     capture_end: CaptureEnd,
@@ -97,6 +133,12 @@ struct WorkResult {
     output: String,
     timings: Timings,
     outcome: Outcome,
+    /// What the user can reach on the clipboard, for a dictation that failed
+    /// after its words existed. Carried as its own answer rather than read
+    /// back out of the failure's prose, because the toast has to show the
+    /// text that is actually there: the raw transcription and the finished
+    /// text are different strings, and only one of them is on the clipboard.
+    preserved: Option<Preserved>,
     /// The utterance's WAV filename stem, which the worker sees as part of the
     /// audio path and records against its own trace. Correlating on this rather
     /// than on timestamps or arrival order means a dropped or reordered record
@@ -114,6 +156,10 @@ enum PipelineMessage {
     /// empty result: there is no transcript, no route and no insertion to
     /// report, and the capsule has nothing to do but say so and settle.
     NoSpeech,
+    /// Speech that could not be decoded, with what the console shows about it.
+    NotUnderstood {
+        note: String,
+    },
 }
 
 pub struct LocalFlowApp {
@@ -167,7 +213,7 @@ impl LocalFlowApp {
                 Err(error) => {
                     let (_tx, events) = std::sync::mpsc::channel();
                     (
-                        GlobalHotkey,
+                        GlobalHotkey::default(),
                         events,
                         Some(Failure::blocked(
                             "Hotkey unavailable",
@@ -204,15 +250,16 @@ impl LocalFlowApp {
         };
         // Losing this is a functional problem, not a cosmetic one: a capsule
         // that takes focus when clicked leaves the next dictation with nowhere
-        // to go, which surfaces later as "No text field focused" and looks
-        // like the user's mistake. It is reported last because the other two
-        // stop dictation outright.
+        // to go, so it lands on the clipboard instead of at the cursor and
+        // looks like the user's mistake. It is reported last because the other
+        // two stop dictation outright.
         let focus_error = (!capsule_non_activating).then(|| {
             Failure::blocked(
                 "Capsule takes focus",
                 "The capsule could not be stopped from taking keyboard focus. \
                  Clicking it will move focus away from what you are writing in, \
-                 and the next dictation will report no text field focused.",
+                 and the next dictation will be copied to the clipboard rather \
+                 than typed where you wanted it.",
             )
         });
         if let Some(failure) =
@@ -221,8 +268,9 @@ impl LocalFlowApp {
             // The dot points at the console, so the console has to have
             // something to show when the user follows it. Clearing the dwell
             // timer keeps a startup failure on the capsule indefinitely: there
-            // is no working state for it to decay back into...
-            state.record_failure(failure);
+            // is no working state for it to decay back into. Nothing has been
+            // dictated yet, so nothing is waiting on the clipboard either.
+            state.record_failure(failure, None);
             state.done_at = None;
         }
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
@@ -236,6 +284,7 @@ impl LocalFlowApp {
             audio_dir,
             cc.egui_ctx.clone(),
             worker_shutdown.clone(),
+            hotkey.cursor_moved(),
         );
         let centre = crate::window_position::load(&data_dir);
         // Matches what main.rs already decided the window starts at, from the
@@ -267,14 +316,13 @@ impl LocalFlowApp {
         if matches!(self.state.hud, HudState::Listening | HudState::Processing) {
             return;
         }
-        let target_pid = frontmost_application_pid();
-        if target_pid == Some(std::process::id() as i32) || target_pid.is_none() {
-            self.fail_locally("start_recording", Failure::blocked(
-                "No text field focused",
-                "Focus the destination text field before dictating",
-            ));
-            return;
-        }
+        // LocalFlow's own window is not a destination, and neither is no
+        // window at all. Neither is refused: the dictation runs, and what it
+        // produces goes to the clipboard with a notice, which is what the
+        // user wanted from pressing the key. Refusing here used to throw the
+        // words away to report a condition the user could see for themselves.
+        let target_pid =
+            frontmost_application_pid().filter(|pid| *pid != std::process::id() as i32);
         let Some(microphone) = &self.microphone else {
             self.fail_locally("start_recording", Failure::input_unavailable(
                 "Microphone unavailable",
@@ -301,13 +349,41 @@ impl LocalFlowApp {
         let Some(microphone) = &self.microphone else {
             return;
         };
-        self.state.begin_processing();
         let speech_finished = Instant::now();
         // Only the microphone stream is stopped here. Draining the capture
         // buffer and encoding the WAV happen on the pipeline thread, so
         // releasing the hotkey never janks the HUD or delays the next press...
         match microphone.stop_recording() {
             Ok(captured) => {
+                // Answered here rather than anywhere further in, because a
+                // press that held no speech is the one case where the user is
+                // waiting to be told that nothing happened. Everything past
+                // this point is a queue behind the previous dictation's
+                // worker call, and this measurement costs one read of samples
+                // that are already in memory.
+                match captured.inspect() {
+                    Ok(crate::audio::Verdict::TooQuiet { seconds, rms, peak }) => {
+                        crate::latency_trace::record_silence(seconds, rms, peak);
+                        // Thrown away where it lies, or its samples would be
+                        // prepended to whatever is said next.
+                        if let Err(error) = captured.discard() {
+                            self.fail_locally("finish_recording", Failure::dropped(
+                                "Recording failed",
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                        self.state.record_no_speech();
+                        return;
+                    }
+                    Ok(crate::audio::Verdict::Speech { .. }) => {}
+                    // The measurement could not be taken, which says nothing
+                    // about whether there is speech in there. The capture
+                    // goes on to the pipeline, which measures it again on its
+                    // own terms.
+                    Err(error) => eprintln!("LocalFlow could not measure a capture: {error:#}"),
+                }
+                self.state.begin_processing();
                 // A buffer that filled is still a dictation, just a shortened
                 // one, so it travels as an ending rather than an error.
                 let capture_end = if captured.truncated {
@@ -348,6 +424,9 @@ impl LocalFlowApp {
                 }
                 PipelineMessage::Finished(result) => self.apply_result(*result),
                 PipelineMessage::NoSpeech => self.state.record_no_speech(),
+                PipelineMessage::NotUnderstood { note } => {
+                    self.state.record_not_understood(note)
+                }
             }
         }
     }
@@ -361,7 +440,7 @@ impl LocalFlowApp {
         self.state.output = result.output;
         self.state.timings = result.timings;
         match result.outcome {
-            Outcome::Failed(failure) => self.fail(failure),
+            Outcome::Failed(failure) => self.fail(failure, result.preserved),
             // A dictation whose destination went away is still a success from
             // the user's side: the words exist and are on the pasteboard. It
             // is reported as its own state rather than as either a clean
@@ -370,8 +449,8 @@ impl LocalFlowApp {
         }
     }
 
-    fn fail(&mut self, failure: Failure) {
-        self.state.record_failure(failure);
+    fn fail(&mut self, failure: Failure, preserved: Option<Preserved>) {
+        self.state.record_failure(failure, preserved);
     }
 
     /// Fail before any work reached the pipeline, and leave a record of it.
@@ -380,7 +459,9 @@ impl LocalFlowApp {
     /// failures; a dictation refused here left nothing behind at all.
     fn fail_locally(&mut self, stage: &'static str, failure: Failure) {
         crate::latency_trace::record_app_failure(stage, &failure);
-        self.fail(failure);
+        // A dictation refused here never produced words, so there is nothing
+        // on the clipboard to tell the user about.
+        self.fail(failure, None);
     }
 
     /// Resize the window when, and only when, the minimal mode setting has
@@ -591,6 +672,18 @@ impl eframe::App for LocalFlowApp {
                 }
             });
 
+        // Painted after the capsule so it is placed from the centre this
+        // frame's drag may just have changed, and retired first so a toast
+        // whose time is up never gets one more frame of window.
+        self.state.retire_toast(ui::toast::DWELL);
+        if let (Some(toast), Some(centre)) = (self.state.toast.clone(), self.centre) {
+            ui::toast::show(ctx, &toast, centre, &crate::platform::work_areas());
+            // Nothing else wakes the UI while a toast is up: the dictation it
+            // describes has already finished, so without this the fade would
+            // stop on whatever frame the capsule last needed.
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+
         if self.state.console_open {
             let builder = egui::ViewportBuilder::default()
                 .with_title("LocalFlow")
@@ -628,6 +721,7 @@ fn start_pipeline_worker(
     audio_dir: PathBuf,
     repaint: egui::Context,
     shutdown: WorkerShutdown,
+    cursor_moved: CursorMoved,
 ) {
     std::thread::Builder::new()
         .name("localflow-pipeline".into())
@@ -647,8 +741,12 @@ fn start_pipeline_worker(
                 }
             }
             repaint.request_repaint();
+            // Lives with the worker rather than the app because this is the
+            // thread that inserts text, and it handles one dictation at a
+            // time, so the memory needs no lock to stay consistent.
+            let mut cursor = CursorMemory::default();
             for item in work_rx {
-                let message = process(&mut worker, &audio_dir, item);
+                let message = process(&mut worker, &audio_dir, item, &mut cursor, &cursor_moved);
                 // Traced before the send only in the sense of being prepared
                 // here; the UI is told first, because a diagnostic must never
                 // sit between a finished dictation and the capsule showing it.
@@ -681,6 +779,10 @@ fn latency_trace_for(
     let outcome = match result.outcome {
         Outcome::Inserted(Insertion::Pasted) => "inserted",
         Outcome::Inserted(Insertion::CopiedOnly) => "copied",
+        // Kept apart from "copied": one means the user switched away, the
+        // other means LocalFlow declined to paste, and a trace that merged
+        // them could not tell which of the two the new check is causing.
+        Outcome::Inserted(Insertion::CopiedNoField) => "copied_no_field",
         Outcome::Failed(_) => "failed",
     };
     Some((id, outcome, result.route, result.timings.clone()))
@@ -717,6 +819,8 @@ fn process(
     worker: &mut Result<KevWorker, String>,
     audio_dir: &Path,
     item: WorkItem,
+    cursor: &mut CursorMemory,
+    cursor_moved: &CursorMoved,
 ) -> PipelineMessage {
     let speech_finished = item.speech_finished;
     let mut timings = Timings {
@@ -726,8 +830,15 @@ fn process(
     let target_pid = item.target_pid;
     let capture_end = item.capture_end;
     let finalize_started = Instant::now();
-    let audio = match item.captured.write_wav(audio_dir) {
-        Ok(audio) => audio,
+    let audio = match item.captured.finish(audio_dir) {
+        Ok(crate::audio::Finished::Recorded(audio)) => audio,
+        // Nothing was said, and nothing was written: the capture answered for
+        // itself before the worker was involved. Recorded as metadata so the
+        // floor can be reviewed against real presses, never as a dictation.
+        Ok(crate::audio::Finished::TooQuiet { seconds, rms, peak }) => {
+            crate::latency_trace::record_silence(seconds, rms, peak);
+            return PipelineMessage::NoSpeech;
+        }
         Err(error) => {
             return failed(
                 timings,
@@ -737,10 +848,12 @@ fn process(
                 Partial::default(),
                 "Transcription failed",
                 error.to_string(),
+                None,
             )
         }
     };
     timings.capture_finalize_ms = Some(finalize_started.elapsed().as_millis());
+    crate::latency_trace::record_capture(audio.duration.as_secs_f64(), audio.rms, audio.peak);
     timings.audio_ms = Some(audio.duration.as_millis());
     let trace_id = audio
         .path
@@ -764,6 +877,16 @@ fn process(
         Ok(Reply::Transcribed(inference)) => inference,
         // Nothing was said, so there is nothing to route, insert or file.
         Ok(Reply::NoSpeech) => return PipelineMessage::NoSpeech,
+        // Heard and not decoded. The words are gone either way, but the user
+        // said something, so the app says so rather than settling back as
+        // though the key had never been pressed.
+        Ok(Reply::Unintelligible { seconds, confidence }) => {
+            return PipelineMessage::NotUnderstood {
+                note: format!(
+                    "Heard {seconds:.1} s and could not decode it (confidence                      {confidence:.2}). Nothing was inserted."
+                ),
+            }
+        }
         // The pipeline failed after recognising speech. The failure stands,
         // and the words are not thrown away with it.
         Ok(Reply::Failed { message, transcript }) => {
@@ -775,6 +898,7 @@ fn process(
                 Partial { transcript: words, trace_id, ..Default::default() },
                 "Dictation failed",
                 failure_detail(&message, &preserved),
+                Some(preserved),
             );
         }
         Err(error) => {
@@ -784,6 +908,7 @@ fn process(
                 Partial { trace_id, ..Default::default() },
                 "Transcription failed",
                 error.to_string(),
+                None,
             )
         }
     };
@@ -794,12 +919,12 @@ fn process(
     // unimplemented one, so there is a single place that maps route to text.
     timings.transform_ms = inference.processing_ms;
 
-    // An ending the user did not ask for, or a destination that is not there,
-    // both mean the same thing: the words are preserved for the user to place
-    // rather than placed for them.
-    let target_pid = match target_pid.filter(|_| capture_end.may_insert()) {
-        Some(pid) => pid,
-        None => {
+    let insert_started = Instant::now();
+    let placed = match destination(target_pid, capture_end) {
+        Destination::Lost => {
+            // Processing succeeded, so what is preserved is the finished text
+            // rather than the raw transcription.
+            let preserved = preserve(&inference.output, || Preserved::Processed);
             return failed(
                 timings,
                 speech_finished,
@@ -810,31 +935,65 @@ fn process(
                     trace_id,
                 },
                 capture_end.headline(),
-                // Processing succeeded, so what is preserved is the finished
-                // text rather than the raw transcription.
-                failure_detail(
-                    capture_end.explanation(),
-                    &preserve(&inference.output, || Preserved::Processed),
-                ),
-            )
+                failure_detail(capture_end.explanation(), &preserved),
+                Some(preserved),
+            );
         }
+        Destination::Insert(pid) => {
+            // Anything the user pressed or clicked since the last insertion
+            // could have taken the cursor somewhere else, so the memory of
+            // what sits behind it goes before it is consulted.
+            if cursor_moved.take() {
+                cursor.forget();
+            }
+            let (previous, before_previous) = cursor.recall(pid);
+            let joined = crate::insertion::join(previous, before_previous, &inference.output);
+            let placed = insert_text(&joined, pid);
+            // Only text that reached the document describes where the cursor
+            // now is. Anything else left it wherever it already was, which is
+            // somewhere this no longer knows.
+            match placed {
+                Ok(Insertion::Pasted) => cursor.remember(pid, &joined),
+                _ => cursor.forget(),
+            }
+            placed
+        }
+        // Nothing to paste into, so the pasteboard is the whole of the
+        // insertion. It ends as the same outcome as a destination that had no
+        // text field focused, because from the user's side it is the same
+        // thing: the words are on the clipboard and nothing was typed
+        // anywhere.
+        Destination::Clipboard => match preserve(&inference.output, || Preserved::Processed) {
+            Preserved::Processed => Ok(Insertion::CopiedNoField),
+            unavailable => Err(anyhow::anyhow!(
+                "{}",
+                failure_detail(capture_end.explanation(), &unavailable)
+            )),
+        },
     };
-    let insert_started = Instant::now();
-    let insertion = match insert_text(&inference.output, target_pid) {
+    let insertion = match placed {
         Ok(insertion) => insertion,
         Err(error) => {
+            // `insert_text` writes the pasteboard before anything that can
+            // refuse, so these words have usually survived. Asked again here
+            // rather than assumed: the one error it can return before that
+            // write is the pasteboard itself being unavailable, and a toast
+            // that told the user to press Cmd-V for words that are not there
+            // would be worse than saying nothing.
+            let preserved = preserve(&inference.output, || Preserved::Processed);
             return failed(
                 timings,
                 speech_finished,
                 Partial {
                     transcript: inference.transcript,
                     route: Some(inference.route),
-                    output: String::new(),
+                    output: inference.output.clone(),
                     trace_id,
                 },
                 "Couldn't insert",
                 error.to_string(),
-            )
+                Some(preserved),
+            );
         }
     };
     timings.insert_ms = Some(insert_started.elapsed().as_millis());
@@ -845,21 +1004,9 @@ fn process(
         output: inference.output,
         timings,
         outcome: Outcome::Inserted(insertion),
+        preserved: None,
         trace_id,
     }))
-}
-
-/// What became of the user's words when the pipeline failed after producing
-/// them. Preserving is not inserting: text that failed its processing is never
-/// typed into the document as though it had succeeded.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Preserved {
-    /// The raw transcription, because processing never completed.
-    Raw,
-    /// The finished text, which processing produced but insertion could not place.
-    Processed,
-    /// The words could not even be put on the pasteboard.
-    Unavailable(String),
 }
 
 /// The detail the console shows for a failure that happened after the user's
@@ -914,6 +1061,7 @@ fn failed(
     partial: Partial,
     headline: &'static str,
     error: String,
+    preserved: Option<Preserved>,
 ) -> PipelineMessage {
     timings.total_ms = Some(speech_finished.elapsed().as_millis());
     PipelineMessage::Finished(Box::new(WorkResult {
@@ -924,6 +1072,7 @@ fn failed(
         // Every pipeline failure happens after the user has spoken, so the
         // kind is settled here: the words did not come back.
         outcome: Outcome::Failed(Failure::dropped(headline, error)),
+        preserved,
         trace_id: partial.trace_id,
     }))
 }
@@ -943,6 +1092,19 @@ fn install_visuals(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pressing the key with nothing able to receive the text is not a
+    /// failure and never was one worth refusing: the words exist, and the
+    /// clipboard can hold them. What must not be swallowed by the same answer
+    /// is a capture that ended before the user had finished speaking, because
+    /// there the dictation really was cut short.
+    #[test]
+    fn a_dictation_with_nowhere_to_land_is_not_a_lost_one() {
+        assert_eq!(destination(Some(4321), CaptureEnd::Released), Destination::Insert(4321));
+        assert_eq!(destination(None, CaptureEnd::Released), Destination::Clipboard);
+        assert_eq!(destination(Some(4321), CaptureEnd::CeilingReached), Destination::Lost);
+        assert_eq!(destination(None, CaptureEnd::BufferFull), Destination::Lost);
+    }
 
     /// The promise is that dictation audio never outlives its utterance, and a
     /// crash is exactly when that promise used to break: nothing deleted the
