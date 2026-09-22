@@ -29,13 +29,19 @@ const MAX_RECORDING_SECONDS: usize = 300;
 /// same gain.
 const TARGET_BUFFER_FRAMES: u32 = 128;
 
-/// A microphone opened once and then kept open for the lifetime of the
-/// application.
+/// A microphone opened ahead of the keypress and kept open until the system
+/// input changes or its device goes away.
 ///
 /// Opening the device and building the stream costs over a hundred
 /// milliseconds, and doing that when the hotkey is pressed spends it out of
 /// the first moments of speech. Paying it once at startup means a keypress
 /// only has to restart an already-built stream.
+///
+/// It is bound to one device, not to whatever the system input is at the
+/// moment: CoreAudio keeps a stream on the device it was built for. So it
+/// remembers which device that was, and records whether the stream has failed, which
+/// is how CoreAudio reports the device going away. `is_current` answers
+/// whether it is still the right thing to record from.
 ///
 /// The stream is paused whenever PrivacyFlow is not recording, so the
 /// microphone is not live between dictations, and it is not live before the
@@ -46,6 +52,10 @@ const TARGET_BUFFER_FRAMES: u32 = 128;
 /// the whole point of opening early.
 pub struct Microphone {
     stream: cpal::Stream,
+    /// Set by the stream's error callback. On macOS that callback fires when
+    /// the device disappears, and cpal has already stopped the stream by
+    /// then, so nothing more will ever be captured from it.
+    failed: Arc<AtomicBool>,
     /// Only the pipeline thread ever locks this. The audio callback holds the
     /// producer and never touches the lock, so the real-time path stays
     /// wait-free.
@@ -90,7 +100,12 @@ impl Microphone {
         let callback_recorded = recorded.clone();
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = overflowed.clone();
-        let err_fn = |err| eprintln!("PrivacyFlow audio stream error: {err}");
+        let failed = Arc::new(AtomicBool::new(false));
+        let callback_failed = failed.clone();
+        let err_fn = move |err| {
+            eprintln!("PrivacyFlow audio stream error: {err}");
+            callback_failed.store(true, Ordering::Relaxed);
+        };
 
         let mut config: cpal::StreamConfig = supported.clone().into();
         config.buffer_size = buffer_size;
@@ -155,6 +170,7 @@ impl Microphone {
 
         Ok(Self {
             stream,
+            failed,
             samples: Arc::new(Mutex::new(consumer)),
             sample_rate,
             level,
@@ -189,9 +205,14 @@ impl Microphone {
     /// does no draining and no encoding; the caller finishes the recording off
     /// that thread.
     pub fn stop_recording(&self) -> Result<CapturedAudio> {
-        self.stream
-            .pause()
-            .context("Could not pause microphone stream")?;
+        // A failed stream was already stopped by cpal, and its device may no
+        // longer exist to be told to pause. What it captured before failing
+        // is still in the buffer and still wanted.
+        if !self.has_failed() {
+            self.stream
+                .pause()
+                .context("Could not pause microphone stream")?;
+        }
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
         // An overflow is reported rather than thrown. The ring buffer refuses
         // new samples once it is full, so what was captured is the *start* of
@@ -203,6 +224,30 @@ impl Microphone {
             truncated: self.overflowed.load(Ordering::Relaxed),
             device_name: self.device_name.clone(),
         })
+    }
+
+    /// Whether this is still the microphone to record from: the stream has
+    /// not failed, and the device is still the system input.
+    ///
+    /// Cheap enough to ask on every keypress. It is a single CoreAudio
+    /// property read, which is far less than the stream build it can save.
+    pub fn is_current(&self) -> bool {
+        if self.has_failed() {
+            return false;
+        }
+        // Compared by name because cpal exposes no device identity. Two inputs
+        // with the same name would be mistaken for one another, which is the
+        // one switch this does not see.
+        cpal::default_host()
+            .default_input_device()
+            .and_then(|device| device.name().ok())
+            .is_some_and(|name| name == self.device_name)
+    }
+
+    /// Whether the stream has failed since it was opened, which on macOS means
+    /// the device went away.
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
     }
 
     pub fn level(&self) -> f32 {

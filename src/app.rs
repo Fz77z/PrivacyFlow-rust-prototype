@@ -57,6 +57,9 @@ pub enum CaptureEnd {
     CeilingReached,
     /// The buffer filled, so the end of the dictation was never captured.
     BufferFull,
+    /// The microphone went away mid-dictation, so the rest of it was never
+    /// captured.
+    DeviceLost,
 }
 
 impl CaptureEnd {
@@ -70,6 +73,7 @@ impl CaptureEnd {
             CaptureEnd::Released => "Couldn't insert",
             CaptureEnd::CeilingReached => "Recording hit 5 min",
             CaptureEnd::BufferFull => "Recording filled the buffer",
+            CaptureEnd::DeviceLost => "Microphone disconnected",
         }
     }
 
@@ -82,6 +86,9 @@ impl CaptureEnd {
             CaptureEnd::BufferFull =>
                 "The recording filled its buffer, so the end of what you said was not \
                  captured. What was captured has been transcribed.",
+            CaptureEnd::DeviceLost =>
+                "The microphone disconnected during the recording, so the rest of what \
+                 you said was not captured. What was captured has been transcribed.",
         }
     }
 }
@@ -403,15 +410,17 @@ impl PrivacyFlowApp {
         // words away to report a condition the user could see for themselves.
         let target_pid =
             frontmost_application_pid().filter(|pid| *pid != std::process::id() as i32);
-        let Some(microphone) = &self.microphone else {
-            self.fail_locally("start_recording", Failure::input_unavailable(
-                "Microphone unavailable",
-                "The microphone is unavailable; restart PrivacyFlow",
-            ));
-            return;
+        let microphone = match self.current_microphone() {
+            Ok(microphone) => microphone,
+            Err(error) => {
+                self.fail_locally("start_recording", Failure::input_unavailable(
+                    "Microphone unavailable",
+                    format!("Microphone unavailable: {error:#}"),
+                ));
+                return;
+            }
         };
-        // The stream was built at startup, so this only restarts it. Opening
-        // the device here would cost over a hundred milliseconds of speech...
+        // The stream is normally already built, so this only restarts it...
         if let Err(error) = microphone.start_recording() {
             self.fail_locally("start_recording",
                 Failure::input_unavailable("Microphone unavailable", error.to_string()));
@@ -430,6 +439,22 @@ impl PrivacyFlowApp {
         if self.state.worker == WorkerStatus::Ready {
             let _ = self.work_tx.send(Work::Prepare);
         }
+    }
+
+    /// The microphone to record from, reopened if the system input has
+    /// changed, if its device went away, or if there was none to open before.
+    ///
+    /// Reopening costs over a hundred milliseconds out of the start of the
+    /// dictation, but only on the first press after a change. Recording from
+    /// the old device instead would cost the whole dictation, silently.
+    fn current_microphone(&mut self) -> anyhow::Result<&Microphone> {
+        // A stale microphone is dropped here, before its replacement is
+        // opened, so the old device is never held beside the new one.
+        let microphone = match self.microphone.take().filter(Microphone::is_current) {
+            Some(microphone) => microphone,
+            None => Microphone::open()?,
+        };
+        Ok(self.microphone.insert(microphone))
     }
 
     /// Play a cue, if the user wants them and there is anything to play them
@@ -764,6 +789,13 @@ impl eframe::App for PrivacyFlowApp {
             // the moment the app started and discarding bought nothing. What
             // it cost was five minutes of someone's words.
             self.finish_recording(CaptureEnd::CeilingReached);
+        }
+        // The device going away stops the stream, so holding on would only
+        // record nothing for as long as the key stays down.
+        if self.recording_started.is_some()
+            && self.microphone.as_ref().is_some_and(Microphone::has_failed)
+        {
+            self.finish_recording(CaptureEnd::DeviceLost);
         }
         if let Some(done_at) = self.state.done_at {
             if done_at.elapsed() > Duration::from_millis(1400)
@@ -1423,6 +1455,7 @@ mod preservation_tests {
     fn an_ending_the_user_did_not_ask_for_never_inserts() {
         assert!(!CaptureEnd::CeilingReached.may_insert());
         assert!(!CaptureEnd::BufferFull.may_insert());
+        assert!(!CaptureEnd::DeviceLost.may_insert());
     }
 
     /// Reaching the ceiling is reported as what it is, and says the words

@@ -44,6 +44,9 @@ Grant PrivacyFlow microphone, Accessibility, and Input Monitoring permissions wh
 The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup.
 Opening the device costs over a hundred milliseconds, and paying that on each keypress used to come out of the first moments of speech.
 The stream is paused as soon as it is opened and resumed only while you hold the hotkey, so the microphone is not live between dictations, or before the first one.
+PrivacyFlow records from the system input.
+If you change it, or the device disconnects, the next press reopens the microphone on whatever the system input is then, which costs that one press a little over a hundred milliseconds at its start.
+A device that disconnects mid-dictation ends the recording there: what was captured is transcribed and left on the clipboard, and it is not pasted.
 Then focus an editable application, hold Right Option while speaking, and release it.
 
 The worker sets `HF_HUB_OFFLINE=1`; it does not download models or send dictated content over the network. Captured WAV audio is temporary and is removed after inference.
