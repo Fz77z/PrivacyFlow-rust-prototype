@@ -24,6 +24,11 @@ const DISAPPEAR_SECONDS: f32 = 0.3;
 /// way somewhere else would flash the capsule open over the user's work.
 const REVEAL_DELAY: Duration = Duration::from_millis(300);
 
+/// How long "Show Capsule" in the menu bar keeps the hidden capsule up. Long
+/// enough to find it on screen and reach it; once the pointer is on it, the
+/// capsule stays for as long as the pointer does.
+const SHOW_ON_REQUEST_FOR: Duration = Duration::from_secs(3);
+
 /// Matches the capture buffer's ceiling. Reaching it stops the recording; it
 /// does not throw away what was captured.
 const MAX_RECORDING_DURATION: Duration = Duration::from_secs(300);
@@ -199,6 +204,9 @@ pub struct LocalFlowApp {
     /// When the pointer arrived where the capsule lives, while it is there.
     /// The capsule only opens once the pointer has stayed for REVEAL_DELAY.
     reaching_since: Option<Instant>,
+    /// Until when the capsule is shown because the user asked for it from
+    /// the menu bar, which is the one way to find it while it is hidden.
+    shown_on_request_until: Option<Instant>,
     /// LocalFlow's icon in the menu bar, and the choices made from its menu.
     status_item: crate::platform::status_item::StatusItem,
     menu_choices: std::sync::mpsc::Receiver<crate::platform::status_item::MenuChoice>,
@@ -360,6 +368,7 @@ impl LocalFlowApp {
             pointer_zone: hotkey.pointer_zone(),
             passing_clicks_through: false,
             reaching_since: None,
+            shown_on_request_until: None,
             status_item,
             menu_choices,
             _hotkey: hotkey,
@@ -647,8 +656,18 @@ impl LocalFlowApp {
             }
             None => false,
         };
-        let pointing =
-            minimal && (dwelled || self.dragging || ctx.is_context_menu_open());
+        let requested = match self.shown_on_request_until {
+            Some(until) if Instant::now() < until => {
+                ctx.request_repaint_after(until - Instant::now());
+                true
+            }
+            _ => {
+                self.shown_on_request_until = None;
+                false
+            }
+        };
+        let pointing = minimal
+            && (dwelled || requested || self.dragging || ctx.is_context_menu_open());
         // Everywhere outside the reach is empty window, which used to swallow
         // every click aimed at whatever was underneath. Until the window's
         // place on screen is known the zone cannot be watched either, so
@@ -811,6 +830,12 @@ impl eframe::App for LocalFlowApp {
         let mut raise_console = false;
         while let Ok(choice) = self.menu_choices.try_recv() {
             match choice {
+                crate::platform::status_item::MenuChoice::ShowCapsule => {
+                    self.shown_on_request_until = Some(Instant::now() + SHOW_ON_REQUEST_FOR);
+                    // The shape was already chosen this frame, before the
+                    // menu was read, so the capsule appears on the next one.
+                    ctx.request_repaint();
+                }
                 crate::platform::status_item::MenuChoice::OpenConsole => {
                     self.state.open_console();
                     raise_console = true;

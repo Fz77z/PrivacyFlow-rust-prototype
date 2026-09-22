@@ -17,6 +17,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 /// What the user picked from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuChoice {
+    /// Bring the hidden capsule up for a moment, so the user can see where
+    /// it lives and move it.
+    ShowCapsule,
     OpenConsole,
     Quit,
 }
@@ -38,6 +41,11 @@ define_class!(
     struct MenuTarget;
 
     impl MenuTarget {
+        #[unsafe(method(showCapsule:))]
+        fn show_capsule(&self, _sender: Option<&AnyObject>) {
+            self.choose(MenuChoice::ShowCapsule);
+        }
+
         #[unsafe(method(openConsole:))]
         fn open_console(&self, _sender: Option<&AnyObject>) {
             self.choose(MenuChoice::OpenConsole);
@@ -121,6 +129,7 @@ impl StatusItem {
         button.setToolTip(Some(&NSString::from_str("LocalFlow")));
 
         let menu = NSMenu::new(mtm);
+        menu.addItem(&menu_item(mtm, &target, "Show Capsule", sel!(showCapsule:), ""));
         menu.addItem(&menu_item(mtm, &target, "Open Console", sel!(openConsole:), ""));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&menu_item(mtm, &target, "Quit LocalFlow", sel!(quit:), "q"));
