@@ -12,9 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
-/// How long the capsule takes to change size. This is drawing rather than an
-/// operating system window resize, so it is eased at the display's rate.
-const GROW_SECONDS: f32 = 0.18;
+/// How long the bead takes to fade between faint and solid. Opacity has no
+/// momentum worth modelling, so this is a plain fade rather than a spring.
+const PRESENCE_SECONDS: f32 = 0.25;
+
+/// How solid the bead is drawn while nothing is happening and nobody is
+/// pointing at it. Faint enough to stay out of the way, solid enough to find.
+const RESTING_PRESENCE: f32 = 0.55;
 
 /// Matches the capture buffer's ceiling. Reaching it stops the recording; it
 /// does not throw away what was captured.
@@ -205,6 +209,12 @@ pub struct LocalFlowApp {
     /// nothing else, so it changes only when the user toggles that, never
     /// while the capsule is animating between its three painted sizes.
     window_size: egui::Vec2,
+    /// The capsule's painted width and height, each eased by its own spring
+    /// on the same feel so the shape cannot shear.
+    capsule_width: ui::motion::Spring,
+    capsule_height: ui::motion::Spring,
+    /// Smooths the microphone level into the listening bars.
+    voice_meter: ui::meter::VoiceMeter,
 }
 
 impl LocalFlowApp {
@@ -308,6 +318,8 @@ impl LocalFlowApp {
         // frame: an unseeded `None` would read as a change on frame one and
         // immediately resize a window that was already correct.
         let window_size = ui::theme::window_size(state.settings.minimal_mode);
+        let resting =
+            ui::capsule::size_for(state.settings.minimal_mode, false, false).points();
         Self {
             state,
             microphone,
@@ -323,6 +335,9 @@ impl LocalFlowApp {
             dragging: false,
             window_size,
             worker_shutdown,
+            capsule_width: ui::motion::Spring::new(resting.x),
+            capsule_height: ui::motion::Spring::new(resting.y),
+            voice_meter: ui::meter::VoiceMeter::default(),
         }
     }
 
@@ -354,6 +369,7 @@ impl LocalFlowApp {
             return;
         }
         self.state.reset_for_recording();
+        self.voice_meter.reset();
         self.target_pid = target_pid;
         self.recording_started = Some(Instant::now());
         self.warned_quiet = false;
@@ -530,13 +546,14 @@ impl LocalFlowApp {
     /// What the capsule should be painted as, and how solid.
     ///
     /// Returns the painted size, which is animated and so is usually between
-    /// the three fixed sizes. The capsule works out its own layout from it.
+    /// the three fixed sizes, and how solid to draw it. The capsule works out
+    /// its own layout from the size.
     ///
     /// The window never changes size, so nothing here touches the viewport.
     /// The pointer comes from egui rather than from the screen, because the
     /// window is now the catchment and receives real move events across the
     /// whole of it, including the parts it does not paint.
-    fn choose_shape(&mut self, ctx: &egui::Context) -> egui::Vec2 {
+    fn choose_shape(&mut self, ctx: &egui::Context) -> (egui::Vec2, f32) {
         let minimal = self.state.settings.minimal_mode;
         let window = ctx.screen_rect();
         // The capsule sits in the middle of the catchment, and this is the
@@ -558,13 +575,35 @@ impl LocalFlowApp {
         // moment after release, until transcription is worth announcing.
         let recording = self.recording_started.is_some();
         let size = ui::capsule::size_for(minimal, pointing, recording);
-        // Animated, because this is now drawing rather than an operating
-        // system window resize. Both axes are eased on the same clock, so the
-        // capsule cannot shear.
+        // Sprung rather than tweened, so growing pops open and a change of
+        // mind part way turns around smoothly. The feel is chosen from the
+        // width, and both axes share it so they stay in step.
         let target = size.points();
-        egui::vec2(
-            ctx.animate_value_with_time(egui::Id::new("capsule_width"), target.x, GROW_SECONDS),
-            ctx.animate_value_with_time(egui::Id::new("capsule_height"), target.y, GROW_SECONDS),
+        let feel = if target.x >= self.capsule_width.value() {
+            ui::motion::GROW
+        } else {
+            ui::motion::SHRINK
+        };
+        let seconds = ctx.input(|i| i.stable_dt).min(1.0 / 20.0);
+        let width_moving = self.capsule_width.step(target.x, seconds, feel);
+        let height_moving = self.capsule_height.step(target.y, seconds, feel);
+        if width_moving || height_moving {
+            ctx.request_repaint();
+        }
+        // Faint only when the bead is simply resting. An unread failure keeps
+        // it solid, because a tinted bead is the only place that failure can
+        // still be seen.
+        let resting = size == ui::capsule::CapsuleSize::Bead
+            && self.state.hud == HudState::Idle
+            && !self.state.unread_failure;
+        let presence = ctx.animate_value_with_time(
+            egui::Id::new("capsule_presence"),
+            if resting { RESTING_PRESENCE } else { 1.0 },
+            PRESENCE_SECONDS,
+        );
+        (
+            egui::vec2(self.capsule_width.value(), self.capsule_height.value()),
+            presence,
         )
     }
 }
@@ -620,9 +659,11 @@ impl eframe::App for LocalFlowApp {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
+        let frame_seconds = ctx.input(|i| i.stable_dt).min(1.0 / 20.0);
         if let Some(started) = self.recording_started {
             if let Some(microphone) = &self.microphone {
-                self.state.mic_level = microphone.level();
+                self.state.voice_bars =
+                    self.voice_meter.update(microphone.level(), frame_seconds);
                 // Said once per press. The measurement keeps falling while the
                 // user reads it, and a toast that re-raised itself every frame
                 // would never finish appearing.
@@ -637,9 +678,15 @@ impl eframe::App for LocalFlowApp {
                 }
             }
             ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.state.hud == HudState::Listening {
+            // Released, but not yet announced as transcribing. The bars fall
+            // away with the voice instead of freezing where it left them.
+            self.state.voice_bars = self.voice_meter.update(0.0, frame_seconds);
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
         if self.state.hud == HudState::Processing {
-            ctx.request_repaint_after(Duration::from_millis(50));
+            // The transcribing wave travels, and at a slower rate it steps.
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
         // Nothing else will wake the UI in time to make the announcement,
         // because the pipeline only repaints when it has an answer.
@@ -660,7 +707,7 @@ impl eframe::App for LocalFlowApp {
         }
 
         self.follow_setting_with_the_window(ctx);
-        let painted = self.choose_shape(ctx);
+        let (painted, presence) = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
@@ -669,7 +716,7 @@ impl eframe::App for LocalFlowApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let response =
-                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted, presence);
                 self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {

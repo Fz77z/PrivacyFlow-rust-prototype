@@ -23,18 +23,46 @@ enum Bar {
 pub struct Appearance {
     pub state: HudState,
     pub failure: Option<FailureKind>,
+    /// How long ago the dictation settled on its result, in seconds, if it
+    /// has. Drives the one-off gestures that mark an ending: the pop of a
+    /// success and the shake of a failure.
+    pub settled_for: Option<f32>,
 }
 
-/// Paints the mark. `level` is the current microphone level and `time` drives
-/// the shimmer; both only ever change bar heights inside `rect`, never the
-/// box itself.
+/// While listening the bars never drop below this, so silence reads as a row
+/// of short bars waiting for a voice rather than as the resting silhouette.
+const LISTENING_FLOOR: f32 = 0.2;
+
+/// The transcribing wave: how fast it travels, how far apart the bars sit on
+/// it, and how much of the box it swings through. Fast and wide enough to be
+/// unmistakably moving at bead size, where the old shimmer read as still.
+const WAVE_SPEED: f32 = 7.0;
+const WAVE_SPACING: f32 = 0.9;
+const WAVE_FLOOR: f32 = 0.3;
+const WAVE_SWING: f32 = 0.5;
+
+/// The success pop: how long it lasts and how far the bars jump.
+const POP_SECONDS: f32 = 0.32;
+const POP_HEIGHT: f32 = 0.45;
+
+/// The failure shake: how long it lasts, how fast it swings, and how far,
+/// as a fraction of the mark's width.
+const SHAKE_SECONDS: f32 = 0.42;
+const SHAKE_SPEED: f32 = 42.0;
+const SHAKE_WIDTH: f32 = 0.11;
+
+/// Paints the mark. `voice` is how far each bar stands while listening, from
+/// the voice meter, and `time` drives the transcribing wave. Neither ever
+/// changes the box itself, only the bars inside it and, for the failure
+/// shake, where the box sits for a moment.
 pub fn paint(
     painter: &Painter,
     rect: Rect,
     appearance: &Appearance,
-    level: f32,
+    voice: [f32; 4],
     time: f64,
 ) {
+    let rect = rect.translate(Vec2::new(shake(appearance) * rect.width(), 0.0));
     let bar_width = rect.width() * BAR_WIDTH_FRACTION;
     // Bars scale with the box, and so does the stroke that draws a hollow
     // one: at the dictating size's narrower bars, a fixed 1.4pt stroke would
@@ -43,7 +71,7 @@ pub fn paint(
     let hollow_stroke = 1.4 * rect.width() / 36.0;
     let bars = bars_for(appearance);
     for (index, (x, resting)) in BARS.iter().enumerate() {
-        let height = rect.height() * animated_height(appearance, index, *resting, level, time);
+        let height = rect.height() * animated_height(appearance, index, *resting, voice, time);
         let left = rect.left() + rect.width() * x;
         let bar = Rect::from_center_size(
             Pos2::new(left + bar_width / 2.0, rect.center().y),
@@ -101,34 +129,49 @@ fn bars_for(appearance: &Appearance) -> [Bar; 4] {
     }
 }
 
-/// Only listening and transcribing move, and only within the fixed box.
+/// How tall a bar stands right now, as a fraction of the box.
+///
+/// Each state that moves has its own motion as well as its own colour. At
+/// bead size colour is the only other thing that tells the states apart,
+/// and colour alone fails for anyone who cannot tell red from green.
 fn animated_height(
     appearance: &Appearance,
     index: usize,
     resting: f32,
-    level: f32,
+    voice: [f32; 4],
     time: f64,
 ) -> f32 {
     if appearance.failure.is_some() {
         return resting;
     }
     match appearance.state {
-        HudState::Listening => {
-            // Raising every bar by the same amount kept the silhouette and
-            // only nudged it, which did not read as hearing anything. Each
-            // bar instead swings on its own phase, and the voice decides how
-            // far the bars travel from rest towards that swing. The square
-            // root lifts ordinary speaking volume, which sits low on the
-            // linear level, into a visible share of the range.
-            let loudness = level.clamp(0.0, 1.0).sqrt();
-            let swing = (time as f32 * 9.0 + index as f32 * 1.9).sin() * 0.5 + 0.5;
-            let target = 0.25 + 0.75 * swing;
-            (resting + (target - resting) * loudness).clamp(0.18, 1.0)
-        }
+        HudState::Listening => LISTENING_FLOOR + (1.0 - LISTENING_FLOOR) * voice[index],
         HudState::Processing => {
-            let shimmer = (time as f32 * 2.0 + index as f32 * 0.7).sin() * 0.5 + 0.5;
-            (resting * 0.7 + shimmer * 0.3).clamp(0.18, 1.0)
+            let phase = time as f32 * WAVE_SPEED - index as f32 * WAVE_SPACING;
+            WAVE_FLOOR + WAVE_SWING * (phase.sin() * 0.5 + 0.5)
+        }
+        HudState::Done | HudState::Copied => {
+            let Some(settled_for) = appearance.settled_for else {
+                return resting;
+            };
+            let progress = (settled_for / POP_SECONDS).clamp(0.0, 1.0);
+            // One smooth hump from rest, up, and back to rest.
+            let pop = (progress * std::f32::consts::PI).sin() * POP_HEIGHT;
+            (resting * (1.0 + pop)).min(1.0)
         }
         _ => resting,
     }
+}
+
+/// How far the mark is pushed sideways by a failure's shake, as a fraction of
+/// its width. A few quick swings that die away, like a head shaking no.
+fn shake(appearance: &Appearance) -> f32 {
+    let (Some(_), Some(settled_for)) = (appearance.failure, appearance.settled_for) else {
+        return 0.0;
+    };
+    if settled_for >= SHAKE_SECONDS {
+        return 0.0;
+    }
+    let dying = 1.0 - settled_for / SHAKE_SECONDS;
+    (settled_for * SHAKE_SPEED).sin() * SHAKE_WIDTH * dying * dying
 }

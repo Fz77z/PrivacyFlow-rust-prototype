@@ -229,7 +229,9 @@ pub enum ConsoleTab {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub hud: HudState,
-    pub mic_level: f32,
+    /// How far each of the mark's bars stands while listening, from the voice
+    /// meter. Only meaningful while the capsule is listening.
+    pub voice_bars: [f32; 4],
     pub transcript: String,
     pub route: Option<Route>,
     pub output: String,
@@ -275,7 +277,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             hud: HudState::Idle,
-            mic_level: 0.0,
+            voice_bars: [0.0; 4],
             transcript: String::new(),
             route: None,
             output: String::new(),
@@ -304,7 +306,7 @@ impl AppState {
     /// result is still on screen cannot be retired by that result's clock.
     pub fn reset_for_recording(&mut self) {
         self.hud = HudState::Listening;
-        self.mic_level = 0.0;
+        self.voice_bars = [0.0; 4];
         self.clear_result();
         self.last_failure = None;
         self.processing_since = None;

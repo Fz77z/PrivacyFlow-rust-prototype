@@ -17,7 +17,7 @@ use crate::state::{Toast, ToastKind};
 use crate::ui::theme;
 use crate::window_position::{self, Centre};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rounding, Stroke, Vec2};
+use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rounding, Vec2};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,9 +71,15 @@ pub fn place(capsule: Centre, capsule_size: Vec2, toast: Vec2, areas: &[WorkArea
 /// blink into existence beside whatever the user is reading.
 fn opacity(elapsed: f32) -> f32 {
     let remaining = DWELL.as_secs_f32() - elapsed;
-    let arriving = (elapsed / FADE_IN).clamp(0.0, 1.0);
-    let leaving = (remaining / FADE_OUT).clamp(0.0, 1.0);
+    let arriving = ease_out((elapsed / FADE_IN).clamp(0.0, 1.0));
+    let leaving = ease_out((remaining / FADE_OUT).clamp(0.0, 1.0));
     arriving.min(leaving)
+}
+
+/// Fast at first and slowing into place, the way things come to rest. A
+/// linear fade and rise read as mechanical.
+fn ease_out(progress: f32) -> f32 {
+    1.0 - (1.0 - progress).powi(3)
 }
 
 fn body_font() -> FontId {
@@ -127,7 +133,8 @@ pub fn show(ctx: &egui::Context, toast: &Toast, capsule: Centre, areas: &[WorkAr
     let size = Vec2::new(WIDTH, height);
     let (x, y) = place(capsule, theme::CAPSULE_SIZE, size, areas);
     let alpha = opacity(toast.raised_at.elapsed().as_secs_f32());
-    let rise = RISE * (1.0 - (toast.raised_at.elapsed().as_secs_f32() / FADE_IN).clamp(0.0, 1.0));
+    let rise =
+        RISE * (1.0 - ease_out((toast.raised_at.elapsed().as_secs_f32() / FADE_IN).clamp(0.0, 1.0)));
     let builder = egui::ViewportBuilder::default()
         .with_inner_size([size.x, size.y])
         .with_position([x, y])
@@ -150,12 +157,12 @@ pub fn show(ctx: &egui::Context, toast: &Toast, capsule: Centre, areas: &[WorkAr
                 let rect = ui.max_rect().shrink(1.0).translate(Vec2::new(0.0, rise));
                 let painter = ui.painter();
                 let fade = |colour: Color32| colour.gamma_multiply(alpha);
-                painter.rect_filled(rect, Rounding::same(14.0), fade(theme::FILL));
-                painter.rect_stroke(
-                    rect,
-                    Rounding::same(14.0),
-                    Stroke::new(1.0, fade(border)),
-                );
+                // The outline is a filled shape with the fill laid on top,
+                // not a stroke beside it, for the same reason as the
+                // capsule's: a stroke and a fill meeting at an edge let the
+                // desktop through as a light hairline.
+                painter.rect_filled(rect, Rounding::same(14.0), fade(border));
+                painter.rect_filled(rect.shrink(1.0), Rounding::same(13.0), fade(theme::FILL));
                 let left = rect.left() + PAD;
                 let mut top = rect.top() + PAD;
                 painter.text(

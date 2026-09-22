@@ -92,11 +92,19 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
 /// Paints the capsule into the middle of its window.
 ///
 /// `painted` is the size to draw at, which is animated and so is usually
-/// between the three fixed sizes. `layout` is which of the three arrangements
-/// to draw, chosen from the size actually being drawn rather than the one
-/// being animated towards, so a half grown capsule never paints a label into
-/// a shape too small to hold it.
-pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleResponse {
+/// between the three fixed sizes. The layout is chosen from the size actually
+/// being drawn rather than the one being animated towards, so a half grown
+/// capsule never paints a label into a shape too small to hold it.
+///
+/// `presence` is how solid the whole capsule is drawn, from 0 to 1. The bead
+/// at rest is drawn faint, so it stays out of the way until the user acts.
+pub fn show(
+    ui: &mut Ui,
+    state: &AppState,
+    time: f64,
+    painted: Vec2,
+    presence: f32,
+) -> CapsuleResponse {
     // The capsule is centred in its window rather than filling it, and it
     // never quite fills it: the outline is drawn outside the shape, so the
     // shape has to leave the outline somewhere to go. With minimal mode on
@@ -114,7 +122,8 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     let rect = Rect::from_center_size(room.center(), painted);
     // Clipped a little wider than the capsule, because the outline sits
     // outside it and would otherwise be cut off at the very edge.
-    let painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
+    let mut painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
+    painter.set_opacity(presence);
     let failure = failure_for(state);
     // An unread failure tints the bead, which is the only way a failure
     // raised while the user was typing elsewhere can still be seen once the
@@ -132,6 +141,18 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     // point of the animation. Interpolating between three stored radii would
     // be a second thing that has to agree with the first.
     let radius = rect.height() / 2.0;
+    // A soft shadow lifts the capsule off whatever is behind it. The fill is
+    // near black, so on a dark desktop the outline is what separates it and
+    // on a light one the shadow is. Only drawn where the window has room for
+    // it: with minimal mode off the window is exactly the capsule, and a
+    // shadow cut off square at the window's edge would outline the very
+    // rectangle the transparent window exists to hide.
+    let shadow_room = room.shrink(SHADOW.blur / 2.0 + SHADOW.offset.y.abs());
+    if shadow_room.contains_rect(rect) {
+        let mut shadow_painter = ui.painter_at(room);
+        shadow_painter.set_opacity(presence);
+        shadow_painter.add(SHADOW.as_shape(rect, Rounding::same(radius)));
+    }
     // The outline sits outside the fill rather than inside it. Stroking the
     // shape itself puts the line within the capsule, which at bead size eats
     // a visible share of a small shape and reads as a shrunken inner ring.
@@ -171,8 +192,12 @@ pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleR
     mark::paint(
         &painter,
         mark_rect,
-        &Appearance { state: state.hud, failure: failure.map(|f| f.kind) },
-        state.mic_level,
+        &Appearance {
+            state: state.hud,
+            failure: failure.map(|f| f.kind),
+            settled_for: state.done_at.map(|at| at.elapsed().as_secs_f32()),
+        },
+        state.voice_bars,
         time,
     );
     if to_full > 0.0 {
@@ -194,6 +219,15 @@ const COG_TEETH: usize = 8;
 
 /// The capsule's outline, which is drawn outside the shape.
 const EDGE_WIDTH: f32 = 1.0;
+
+/// Soft and close, so it reads as the capsule resting just above the desktop
+/// rather than floating far off it.
+const SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
+    offset: Vec2::new(0.0, 3.0),
+    blur: 14.0,
+    spread: 0.0,
+    color: Color32::from_black_alpha(110),
+};
 
 /// The smallest gap kept between the mark and the capsule's edge, so the
 /// mark never touches the border even when it has to be clamped to fit.
