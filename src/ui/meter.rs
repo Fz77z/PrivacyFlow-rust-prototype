@@ -2,11 +2,14 @@
 /// fills them, in decibels relative to the level the audio thread reports.
 ///
 /// The reported level is the raw RMS times eight, clamped to one, so this
-/// window is roughly -48 to -18 dBFS: a quiet room sits below it and ordinary
-/// speaking volume lands in its upper half. Hearing is logarithmic, and a
-/// linear mapping left normal speech moving the bars by a sliver.
-const QUIET_DB: f32 = -30.0;
-const LOUD_DB: f32 = 0.0;
+/// window is roughly -54 to -30 dBFS. That is set from this machine's own
+/// microphone, which is quiet: silent captures measured about -56 dBFS and
+/// whole dictations about -54 dBFS including their pauses (see
+/// docs/investigations/2026-09-23-silence-floor-false-refusals.md). A window
+/// placed for a typical microphone, starting at -48 dBFS, left speech here
+/// barely moving the bars. Hearing is logarithmic, so the window is too.
+const QUIET_DB: f32 = -36.0;
+const LOUD_DB: f32 = -12.0;
 
 /// How fast the meter rises to meet a louder sound and falls away after it,
 /// as time constants in seconds. Rising fast and falling slowly is how every
@@ -89,15 +92,18 @@ mod tests {
         bars
     }
 
-    /// Ordinary speech (around -30 dBFS, a reported level near 0.25) must
-    /// move the bars a lot, and a quiet room must leave them still.
+    /// Speech on this machine's quiet microphone must move the bars a lot,
+    /// and its silent floor (about -56 dBFS, a level near 0.013) must leave
+    /// them still. The speech level, -44 dBFS or a level near 0.05, is an
+    /// estimate: only whole-dictation averages were measured, at about -54
+    /// dBFS, and their pauses pull that well below the level while talking.
     #[test]
-    fn speech_fills_the_bars_and_room_noise_does_not() {
+    fn quiet_speech_fills_the_bars_and_room_noise_does_not() {
         let mut meter = VoiceMeter::default();
-        let room = hold(&mut meter, 0.01, 0.5);
+        let room = hold(&mut meter, 0.0126, 0.5);
         assert!(room.iter().all(|bar| *bar == 0.0), "room noise moved the bars: {room:?}");
-        let speech = hold(&mut meter, 0.25, 0.5);
-        assert!(speech[1] > 0.5, "speech barely moved the bars: {speech:?}");
+        let speech = hold(&mut meter, 0.05, 0.5);
+        assert!(speech[1] > 0.4, "speech barely moved the bars: {speech:?}");
     }
 
     /// The ripple: just after the voice starts, the leading bar is ahead of

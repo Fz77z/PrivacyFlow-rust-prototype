@@ -6,7 +6,7 @@ mod nonactivating;
 #[cfg(target_os = "macos")]
 pub use macos::*;
 #[cfg(target_os = "macos")]
-pub use nonactivating::make_capsule_non_activating;
+pub use nonactivating::{make_capsule_non_activating, remove_capsule_system_shadow};
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("LocalFlow MVP currently supports macOS only.");

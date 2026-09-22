@@ -125,25 +125,25 @@ pub fn show(
     let mut painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
     painter.set_opacity(presence);
     let failure = failure_for(state);
-    // An unread failure tints the bead, which is the only way a failure
-    // raised while the user was typing elsewhere can still be seen once the
-    // capsule has shrunk: there is no console icon at that size, and so
-    // nowhere to put the unread dot. Chosen here, before the one shell paint,
-    // rather than painted over it: two fills would composite to something
-    // neither colour asked for.
+    // Minimal mode has no outline: the capsule is a plain shape on its
+    // shadow. The one exception is an unread failure, which rings the bead
+    // in red, because that ring is the only way a failure raised while the
+    // user was typing elsewhere can still be seen once the capsule has
+    // shrunk: there is no console icon at that size, and so nowhere to put
+    // the unread dot.
     let small = painted.x < theme::ACTIVE_SIZE.x;
-    let border = if small && state.unread_failure {
-        theme::ERROR
+    let outline = if small && state.unread_failure {
+        Some(theme::ERROR)
+    } else if state.settings.minimal_mode {
+        None
     } else {
-        border_for(state, failure.is_some())
+        Some(border_for(state, failure.is_some()))
     };
     // All three sizes are pills, so the radius is half the height at every
     // point of the animation. Interpolating between three stored radii would
     // be a second thing that has to agree with the first.
     let radius = rect.height() / 2.0;
-    // A soft shadow lifts the capsule off whatever is behind it. The fill is
-    // near black, so on a dark desktop the outline is what separates it and
-    // on a light one the shadow is. Only drawn where the window has room for
+    // A soft shadow lifts the capsule off whatever is behind it. Only drawn where the window has room for
     // it: with minimal mode off the window is exactly the capsule, and a
     // shadow cut off square at the window's edge would outline the very
     // rectangle the transparent window exists to hide.
@@ -169,11 +169,13 @@ pub fn show(
     // non-concentric: they stay together along the straight edges and open a
     // gap at the rounded ends, which is exactly where this capsule is all
     // curve.
-    painter.rect_filled(
-        rect.expand(EDGE_WIDTH),
-        Rounding::same(radius + EDGE_WIDTH),
-        border,
-    );
+    if let Some(outline) = outline {
+        painter.rect_filled(
+            rect.expand(EDGE_WIDTH),
+            Rounding::same(radius + EDGE_WIDTH),
+            outline,
+        );
+    }
     painter.rect_filled(rect, Rounding::same(radius), theme::FILL);
 
     // The body is everything the icon does not claim, so dragging the widget
@@ -311,7 +313,7 @@ fn paint_label_and_icon(
     // headlines are written wherever the failure happens, several are wider
     // than the gap, and a label left to run on is painted straight through
     // the cog. The whole message is on the cog's tooltip and in the console.
-    let label = fitted_label(ui, text, font, icon_rect.left() - text_left);
+    let label = fitted_label(ui, text, font, label_room());
     painter.galley(
         Pos2::new(text_left, rect.center().y - label.size().y / 2.0),
         label,
@@ -373,6 +375,17 @@ fn hud_label(hud: HudState, processing: &'static str) -> (&'static str, Color32)
         HudState::NotUnderstood => ("Didn't catch that", theme::LABEL),
         HudState::Error => ("Ready", theme::MUTED),
     }
+}
+
+/// The width the label has between the mark and the cog, in the full
+/// capsule. Measured at full size rather than at whatever size is being
+/// painted: while the capsule grows the label is still fading in, and fitting
+/// it to the half-grown gap cut every word down to a lone ellipsis.
+fn label_room() -> f32 {
+    let capsule = Rect::from_center_size(Pos2::ZERO, theme::CAPSULE_SIZE);
+    let mark = mark_rect_for(capsule);
+    let icon_left = capsule.right() - theme::PAD_RIGHT - theme::ICON_SIZE;
+    icon_left - (mark.right() + theme::MARK_GAP)
 }
 
 /// Lays `text` out on one line no wider than `room`, ending in an ellipsis if
@@ -601,10 +614,7 @@ mod tests {
         theme::install(&ctx);
         // Fonts only exist once a frame has run.
         let _ = ctx.run(Default::default(), |_| {});
-        let capsule = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::CAPSULE_SIZE);
-        let mark = mark_rect_for(capsule);
-        let icon_left = capsule.right() - theme::PAD_RIGHT - theme::ICON_SIZE;
-        let room = icon_left - (mark.right() + theme::MARK_GAP);
+        let room = label_room();
         let states = [
             HudState::Idle,
             HudState::Listening,

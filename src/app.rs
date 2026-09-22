@@ -240,6 +240,7 @@ impl LocalFlowApp {
         // replacement identifies the capsule and defers for every other
         // window, so it does not matter that the console is created later.
         let capsule_non_activating = crate::platform::make_capsule_non_activating(cc);
+        crate::platform::remove_capsule_system_shadow(cc);
         let repaint = cc.egui_ctx.clone();
         let (hotkey, hotkey_events, hotkey_error) =
             match GlobalHotkey::right_option(move || repaint.request_repaint()) {
@@ -626,6 +627,11 @@ impl LocalFlowApp {
         if pass_clicks_through != self.passing_clicks_through {
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(pass_clicks_through));
             self.passing_clicks_through = pass_clicks_through;
+        }
+        // Claimed every frame the pointer is over the capsule, since the app
+        // underneath set the cursor last and nothing else will set it back.
+        if reaching {
+            crate::platform::show_arrow_cursor();
         }
         // Only the recording itself grows the capsule. Once the key is let go
         // the bead is enough to carry transcribing and the result in colour,

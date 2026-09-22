@@ -6,7 +6,7 @@ use core_graphics::event::{
     CGEventType, EventField, KeyCode,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use objc2_app_kit::{NSEvent, NSScreen, NSWorkspace};
+use objc2_app_kit::{NSCursor, NSEvent, NSScreen, NSWorkspace};
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use objc2_foundation::MainThreadMarker;
@@ -426,6 +426,16 @@ pub fn pointer_in_window_space() -> (f64, f64) {
     let screens = NSScreen::screens(marker);
     let primary = screens.firstObject().expect("no screen is attached");
     (point.x, primary.frame().size.height - point.y)
+}
+
+/// Show the ordinary arrow while the pointer is over the capsule.
+///
+/// The capsule never becomes the key window, so macOS ignores the cursor
+/// winit asks for on its behalf: cursor rectangles only apply to the key
+/// window. The cursor was left as whatever the app underneath last set,
+/// which over a text editor is an I-beam, so the capsule claims it directly.
+pub fn show_arrow_cursor() {
+    NSCursor::arrowCursor().set();
 }
 
 /// A display's usable area: the screen minus the menu bar and the Dock.

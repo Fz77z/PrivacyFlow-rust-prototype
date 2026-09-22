@@ -29,10 +29,6 @@ pub struct Appearance {
     pub settled_for: Option<f32>,
 }
 
-/// While listening the bars never drop below this, so silence reads as a row
-/// of short bars waiting for a voice rather than as the resting silhouette.
-const LISTENING_FLOOR: f32 = 0.2;
-
 /// The transcribing wave: how fast it travels, how far apart the bars sit on
 /// it, and how much of the box it swings through. Fast and wide enough to be
 /// unmistakably moving at bead size, where the old shimmer read as still.
@@ -145,7 +141,9 @@ fn animated_height(
         return resting;
     }
     match appearance.state {
-        HudState::Listening => LISTENING_FLOOR + (1.0 - LISTENING_FLOOR) * voice[index],
+        // Silence shows the mark's own wave shape, and the voice lifts each
+        // bar from there towards the top of the box.
+        HudState::Listening => resting + (1.0 - resting) * voice[index],
         HudState::Processing => {
             let phase = time as f32 * WAVE_SPEED - index as f32 * WAVE_SPACING;
             WAVE_FLOOR + WAVE_SWING * (phase.sin() * 0.5 + 0.5)

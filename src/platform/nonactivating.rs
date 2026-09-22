@@ -158,6 +158,23 @@ pub fn make_capsule_non_activating(handle: &impl HasWindowHandle) -> bool {
     !window.canBecomeKeyWindow()
 }
 
+/// Stop macOS drawing its own shadow around the capsule's window.
+///
+/// The window is transparent, so macOS traces its shadow from whatever the
+/// capsule last painted, and it re-traces lazily. Every time the capsule
+/// changed size the old outline's shadow lingered for a moment, a dark ring
+/// and a ghost of the previous shape that flicked away after the capsule
+/// had settled. The capsule paints its own soft shadow instead, which moves
+/// with it frame by frame.
+pub fn remove_capsule_system_shadow(handle: &impl HasWindowHandle) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    if let Some(window) = capsule_window(handle) {
+        window.setHasShadow(false);
+    }
+}
+
 /// Replace one method, remembering what was there so the replacement can
 /// defer to it for every window that is not the capsule.
 ///

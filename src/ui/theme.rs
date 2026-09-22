@@ -78,12 +78,7 @@ pub const ICON_HOVER: Color32 = Color32::from_rgb(35, 35, 35);
 // The state accents. These are the only saturated colour in the app, which
 // is why each one has to earn its place rather than being a default hue.
 pub const IDLE: Color32 = Color32::from_rgb(110, 110, 110);
-/// Listening is white rather than a hue. The bars are moving with the voice,
-/// which says "listening" more plainly than any colour, and it keeps green
-/// for the one state that means the words arrived. Listening and inserted
-/// were two nearly identical greens, and at bead size, where colour is most
-/// of what distinguishes the states, they could not be told apart.
-pub const LISTENING: Color32 = Color32::from_rgb(236, 236, 236);
+pub const LISTENING: Color32 = Color32::from_rgb(95, 211, 155);
 pub const TRANSCRIBING: Color32 = Color32::from_rgb(110, 142, 245);
 pub const INSERTED: Color32 = Color32::from_rgb(134, 217, 143);
 pub const ERROR: Color32 = Color32::from_rgb(224, 112, 112);
@@ -96,9 +91,7 @@ pub const WARNING_TEXT: Color32 = Color32::from_rgb(238, 205, 156);
 // Each state tints the capsule's one point border. They are deliberately
 // dark: the border says which state this is to someone already looking,
 // and the mark says it to someone glancing.
-/// Neutral like the listening bars, only lifted enough to show the capsule
-/// is awake.
-pub const BORDER_LISTENING: Color32 = Color32::from_rgb(64, 64, 64);
+pub const BORDER_LISTENING: Color32 = Color32::from_rgb(42, 95, 72);
 pub const BORDER_TRANSCRIBING: Color32 = Color32::from_rgb(51, 64, 110);
 pub const BORDER_INSERTED: Color32 = Color32::from_rgb(58, 95, 63);
 pub const ERROR_BORDER: Color32 = Color32::from_rgb(92, 46, 46);
