@@ -87,6 +87,10 @@ pub const TRANSCRIBING: Color32 = Color32::from_rgb(110, 142, 245);
 pub const INSERTED: Color32 = Color32::from_rgb(134, 217, 143);
 pub const ERROR: Color32 = Color32::from_rgb(224, 112, 112);
 pub const ERROR_TEXT: Color32 = Color32::from_rgb(235, 179, 179);
+/// Amber rather than red. The quiet warning arrives while the dictation is
+/// still running and can still be saved, so it must not read as a failure
+/// that has already happened.
+pub const WARNING_TEXT: Color32 = Color32::from_rgb(238, 205, 156);
 
 // Each state tints the capsule's one point border. They are deliberately
 // dark: the border says which state this is to someone already looking,
@@ -95,6 +99,7 @@ pub const BORDER_LISTENING: Color32 = Color32::from_rgb(42, 95, 72);
 pub const BORDER_TRANSCRIBING: Color32 = Color32::from_rgb(51, 64, 110);
 pub const BORDER_INSERTED: Color32 = Color32::from_rgb(58, 95, 63);
 pub const ERROR_BORDER: Color32 = Color32::from_rgb(92, 46, 46);
+pub const WARNING_BORDER: Color32 = Color32::from_rgb(99, 76, 38);
 
 // The unread dot and the icon tint that goes with it. The dot is the one
 // thing in the widget allowed to be brighter than its surroundings,

@@ -170,6 +170,9 @@ pub struct LocalFlowApp {
     work_tx: Sender<WorkItem>,
     result_rx: Receiver<PipelineMessage>,
     recording_started: Option<Instant>,
+    /// Whether this press has already been called quiet, so the warning is
+    /// raised once rather than on every frame it remains true.
+    warned_quiet: bool,
     target_pid: Option<i32>,
     data_dir: PathBuf,
     /// Where the capsule is centred. Seeded from the remembered position at
@@ -301,6 +304,7 @@ impl LocalFlowApp {
             work_tx,
             result_rx,
             recording_started: None,
+            warned_quiet: false,
             target_pid: None,
             data_dir,
             centre,
@@ -340,6 +344,7 @@ impl LocalFlowApp {
         self.state.reset_for_recording();
         self.target_pid = target_pid;
         self.recording_started = Some(Instant::now());
+        self.warned_quiet = false;
     }
 
     fn finish_recording(&mut self, ending: CaptureEnd) {
@@ -596,9 +601,21 @@ impl eframe::App for LocalFlowApp {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
-        if self.recording_started.is_some() {
+        if let Some(started) = self.recording_started {
             if let Some(microphone) = &self.microphone {
                 self.state.mic_level = microphone.level();
+                // Said once per press. The measurement keeps falling while the
+                // user reads it, and a toast that re-raised itself every frame
+                // would never finish appearing.
+                if !self.warned_quiet
+                    && crate::audio::heading_for_refusal(
+                        started.elapsed(),
+                        microphone.recorded_rms(),
+                    )
+                {
+                    self.warned_quiet = true;
+                    self.state.warn_quiet();
+                }
             }
             ctx.request_repaint_after(Duration::from_millis(16));
         }

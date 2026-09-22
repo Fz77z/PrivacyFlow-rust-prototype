@@ -118,6 +118,9 @@ pub fn show(ctx: &egui::Context, toast: &Toast, capsule: Centre, areas: &[WorkAr
     let (headline_colour, border) = match toast.kind {
         ToastKind::Copied => (theme::LABEL, theme::BORDER_INSERTED),
         ToastKind::Failed => (theme::ERROR_TEXT, theme::ERROR_BORDER),
+        // Not an error: nothing has gone wrong yet, and saying so in red
+        // would read as a failure the user cannot answer. This one they can.
+        ToastKind::Quiet => (theme::WARNING_TEXT, theme::WARNING_BORDER),
     };
     let body = galley(ctx, &toast.body, body_font(), theme::LABEL, BODY_ROWS);
     let height = PAD * 2.0 + HEADLINE_HEIGHT + LINE_GAP + body.size().y + LINE_GAP + FOOTER_HEIGHT;

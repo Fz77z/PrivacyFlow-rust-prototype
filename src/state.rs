@@ -122,6 +122,9 @@ impl Failure {
 pub enum ToastKind {
     Copied,
     Failed,
+    /// Raised while the key is still down, not after. It is the one toast
+    /// that reports something the user can still do something about.
+    Quiet,
 }
 
 /// What LocalFlow says when a dictation ends up on the clipboard instead of
@@ -150,6 +153,22 @@ impl Toast {
             headline: headline.to_owned(),
             body: body.to_owned(),
             footer: "Copied to clipboard · ⌘V",
+            raised_at: Instant::now(),
+        }
+    }
+
+    /// Said while the recording is still running, because it is the only
+    /// moment it can be acted on: leaning in or speaking up now lifts the
+    /// mean back over the floor and the words survive. Afterwards there is
+    /// nothing to do but dictate it again.
+    fn quiet() -> Self {
+        Self {
+            kind: ToastKind::Quiet,
+            headline: "LocalFlow can barely hear you".to_owned(),
+            body: "This dictation is too quiet to be transcribed. Move closer \
+                   to the microphone, or speak up."
+                .to_owned(),
+            footer: "Still recording · it can still be saved",
             raised_at: Instant::now(),
         }
     }
@@ -450,6 +469,11 @@ impl AppState {
     /// unread dot is left exactly as it was, because the dot means "a failure
     /// is waiting in the console" and this is not one. The capsule says so
     /// for a moment and the dwell timer takes it back to Ready.
+    /// Warn that the press being held is heading for refusal.
+    pub fn warn_quiet(&mut self) {
+        self.toast = Some(Toast::quiet());
+    }
+
     pub fn record_no_speech(&mut self) {
         self.hud = HudState::NoSpeech;
         self.settle();
@@ -483,6 +507,20 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+
+    /// The warning is raised while the key is down, and the refusal it
+    /// predicted arrives the moment the key comes up. If ending the dictation
+    /// cleared it, the user would see the warning flash and vanish before
+    /// they could read why nothing was transcribed.
+    #[test]
+    fn a_quiet_warning_outlives_the_refusal_it_predicted() {
+        let mut state = AppState::default();
+        state.reset_for_recording();
+        state.warn_quiet();
+        state.record_no_speech();
+        let toast = state.toast.expect("the warning must still be readable");
+        assert_eq!(toast.kind, ToastKind::Quiet);
+    }
     use super::*;
     use std::time::Duration;
 

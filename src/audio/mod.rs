@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SupportedBufferSize};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +52,9 @@ pub struct Microphone {
     level: Arc<AtomicU32>,
     overflowed: Arc<AtomicBool>,
     device_name: String,
+    /// What this recording measures so far, so a press heading for refusal
+    /// can be answered while it is still being held.
+    recorded: Arc<RecordedLevel>,
 }
 
 impl Microphone {
@@ -81,6 +84,8 @@ impl Microphone {
         let (mut producer, consumer) = RingBuffer::new(capacity);
         let level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let callback_level = level.clone();
+        let recorded = Arc::new(RecordedLevel::default());
+        let callback_recorded = recorded.clone();
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = overflowed.clone();
         let err_fn = |err| eprintln!("LocalFlow audio stream error: {err}");
@@ -98,6 +103,7 @@ impl Microphone {
                         |sample| sample,
                         &callback_level,
                         &callback_overflowed,
+                        &callback_recorded,
                     )
                 },
                 err_fn,
@@ -113,6 +119,7 @@ impl Microphone {
                         |sample| sample as f32 / i16::MAX as f32,
                         &callback_level,
                         &callback_overflowed,
+                        &callback_recorded,
                     )
                 },
                 err_fn,
@@ -128,6 +135,7 @@ impl Microphone {
                         |sample| (sample as f32 / u16::MAX as f32) * 2.0 - 1.0,
                         &callback_level,
                         &callback_overflowed,
+                        &callback_recorded,
                     )
                 },
                 err_fn,
@@ -148,6 +156,7 @@ impl Microphone {
             samples: Arc::new(Mutex::new(consumer)),
             sample_rate,
             level,
+            recorded,
             overflowed,
             device_name: name,
         })
@@ -166,6 +175,7 @@ impl Microphone {
         }
         self.overflowed.store(false, Ordering::Relaxed);
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.recorded.clear();
         self.stream
             .play()
             .context("Could not start microphone stream")
@@ -195,6 +205,11 @@ impl Microphone {
 
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// What the floor will be applied to if the key came up now.
+    pub fn recorded_rms(&self) -> f32 {
+        self.recorded.rms()
     }
 
     /// The device actually being recorded from.
@@ -236,6 +251,64 @@ fn requested_buffer_size(supported: &SupportedBufferSize) -> BufferSize {
 /// safety net is what caught the invention in the first place.
 pub const SILENCE_RMS: f32 = 0.0017;
 pub const MIN_SECONDS: f64 = 0.35;
+
+/// What the current recording measures so far, accumulated as it arrives.
+///
+/// The audio callback is the only writer and it runs on one thread, so a plain
+/// load-then-store is enough; the atomics are here to be read from the UI
+/// thread, not to arbitrate between writers. The sum is kept in f64 for the
+/// same reason `root_mean_square` uses it: an f32 total over millions of
+/// squared samples loses enough precision to move the decision.
+#[derive(Default)]
+pub struct RecordedLevel {
+    sum_squares: AtomicU64,
+    frames: AtomicU64,
+}
+
+impl RecordedLevel {
+    /// Fold one buffer's squared samples into the recording so far.
+    fn accumulate(&self, sum_squares: f64, frames: usize) {
+        let total = f64::from_bits(self.sum_squares.load(Ordering::Relaxed)) + sum_squares;
+        self.sum_squares.store(total.to_bits(), Ordering::Relaxed);
+        self.frames.fetch_add(frames as u64, Ordering::Relaxed);
+    }
+
+    /// Forget the previous recording. Without this the floor would be applied
+    /// to every press since the app started rather than to this one.
+    fn clear(&self) {
+        self.sum_squares.store(0.0f64.to_bits(), Ordering::Relaxed);
+        self.frames.store(0, Ordering::Relaxed);
+    }
+
+    /// The mean the floor will be applied to, as it stands right now.
+    pub fn rms(&self) -> f32 {
+        let frames = self.frames.load(Ordering::Relaxed);
+        if frames == 0 {
+            return 0.0;
+        }
+        let total = f64::from_bits(self.sum_squares.load(Ordering::Relaxed));
+        (total / frames as f64).sqrt() as f32
+    }
+}
+
+/// How long a press must be held before LocalFlow says anything about it
+/// being quiet.
+///
+/// A warning is only worth showing while the user can still act on it. Shorter
+/// presses than this are over before the toast could be read, let alone
+/// answered by leaning in or speaking up.
+pub const QUIET_WARNING_AFTER: Duration = Duration::from_secs(3);
+
+/// Whether a press that has been held for `held`, and whose captured audio so
+/// far measures `recorded_rms`, is heading for refusal.
+///
+/// Measured against the same floor `verdict` will apply when the key comes up,
+/// so this does not estimate the outcome, it predicts it exactly: if nothing
+/// changes, this capture is refused. It stays actionable because the recording
+/// is still running, and speaking up now lifts the mean back over the floor.
+pub fn heading_for_refusal(held: Duration, recorded_rms: f32) -> bool {
+    held >= QUIET_WARNING_AFTER && recorded_rms < SILENCE_RMS
+}
 
 /// The span the loudest-moment measurement is taken over.
 ///
@@ -448,14 +521,15 @@ fn push_mono<T>(
     to_f32: impl Fn(T) -> f32,
     level: &AtomicU32,
     overflowed: &AtomicBool,
+    recorded: &RecordedLevel,
 ) where
     T: Copy,
 {
-    let mut sum_squares = 0.0;
+    let mut sum_squares = 0.0f64;
     let mut frames = 0usize;
     for frame in input.chunks_exact(channels) {
         let sample = frame.iter().map(|value| to_f32(*value)).sum::<f32>() / channels as f32;
-        sum_squares += sample * sample;
+        sum_squares += sample as f64 * sample as f64;
         frames += 1;
         if producer.push(sample).is_err() {
             overflowed.store(true, Ordering::Relaxed);
@@ -463,11 +537,14 @@ fn push_mono<T>(
     }
     if frames != 0 {
         level.store(
-            ((sum_squares / frames as f32).sqrt() * 8.0)
+            (((sum_squares / frames as f64).sqrt() as f32) * 8.0)
                 .clamp(0.0, 1.0)
                 .to_bits(),
             Ordering::Relaxed,
         );
+        // Folded in as it arrives rather than measured at the end, because the
+        // point of this number is to be available while the key is still held.
+        recorded.accumulate(sum_squares, frames);
     }
 }
 
@@ -648,6 +725,55 @@ mod tests {
     }
 
     #[test]
+    fn a_short_press_is_never_called_quiet() {
+        // It would be over before the user could read the toast, let alone
+        // lean in and answer it.
+        assert!(!heading_for_refusal(Duration::from_millis(500), 0.0));
+    }
+
+    #[test]
+    fn holding_a_press_that_is_heading_for_refusal_is_worth_saying() {
+        assert!(heading_for_refusal(QUIET_WARNING_AFTER + Duration::from_millis(1), 0.0009));
+    }
+
+    #[test]
+    fn a_press_that_will_be_accepted_is_left_alone() {
+        assert!(!heading_for_refusal(Duration::from_secs(10), SILENCE_RMS * 2.0));
+    }
+
+    /// The floor refuses what is below it, so sitting exactly on it survives
+    /// and must not be warned about. The warning and the refusal have to read
+    /// the boundary the same way or they will disagree about the same capture.
+    #[test]
+    fn sitting_exactly_on_the_floor_is_not_a_refusal() {
+        assert!(!heading_for_refusal(Duration::from_secs(10), SILENCE_RMS));
+    }
+
+    /// The live measurement and the verdict have to be the same number, or a
+    /// warning would be about a capture other than the one being judged. This
+    /// is what makes the warning a prediction rather than an estimate.
+    #[test]
+    fn the_running_measurement_matches_the_verdict_it_predicts() {
+        let samples: Vec<f32> = (0..4_000)
+            .map(|index| (index as f32 * 0.01).sin() * 0.002)
+            .collect();
+        let (mut producer, _consumer) = RingBuffer::new(samples.len());
+        let level = AtomicU32::new(0.0f32.to_bits());
+        let overflowed = AtomicBool::new(false);
+        let recorded = RecordedLevel::default();
+        // Delivered in buffers, the way a device delivers it.
+        for buffer in samples.chunks(128) {
+            push_mono(buffer, &mut producer, 1, |sample| sample, &level, &overflowed, &recorded);
+        }
+        let expected = root_mean_square(&samples);
+        let measured = recorded.rms();
+        assert!(
+            (measured - expected).abs() < 1e-6,
+            "running rms {measured} should match the verdict's {expected}"
+        );
+    }
+
+    #[test]
     fn callback_downmixes_without_a_mutex() {
         let (mut producer, mut consumer) = RingBuffer::new(4);
         let level = AtomicU32::new(0.0f32.to_bits());
@@ -659,6 +785,7 @@ mod tests {
             |sample| sample,
             &level,
             &overflowed,
+            &RecordedLevel::default(),
         );
         assert_eq!(consumer.pop().unwrap(), 0.0);
         assert_eq!(consumer.pop().unwrap(), 0.5);
