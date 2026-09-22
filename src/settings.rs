@@ -18,10 +18,23 @@ use std::path::{Path, PathBuf};
 /// `serde(default)` means a field added by a later version is absent rather
 /// than fatal when an older file is read, and unknown fields are ignored, so
 /// a file written by a later version still loads here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub minimal_mode: bool,
+    /// Whether a short sound confirms the start and end of a dictation.
+    pub sound_cues: bool,
+}
+
+/// Written out rather than derived, because `sound_cues` defaults on and a
+/// derived `Default` would default it off. That distinction is not academic:
+/// `serde(default)` fills the field for every settings file written before
+/// this setting existed, so a derive would silently turn the cues off for
+/// everyone who already had a settings.json.
+impl Default for Settings {
+    fn default() -> Self {
+        Self { minimal_mode: false, sound_cues: true }
+    }
 }
 
 /// The settings, and whatever went wrong getting them.
@@ -121,6 +134,19 @@ mod tests {
         );
     }
 
+    /// The exact file every existing install already has on disk. The cues
+    /// default on, and `serde(default)` fills the missing field from
+    /// `Settings::default`, so this is what catches a derived `Default`
+    /// quietly turning them off for everyone who upgraded.
+    #[test]
+    fn a_file_written_before_the_cues_existed_still_has_them_on() {
+        let dir = scratch("pre-cues");
+        std::fs::write(dir.join("settings.json"), r#"{"minimal_mode": true}"#).unwrap();
+        let loaded = load(&dir);
+        assert!(loaded.settings.minimal_mode);
+        assert!(loaded.settings.sound_cues, "cues must not default off on upgrade");
+    }
+
     /// The appearance work will add fields to this file. A file written by a
     /// later version must still load in an earlier one, and a file written by
     /// an earlier version must not lose the setting it does have.
@@ -140,7 +166,7 @@ mod tests {
     #[test]
     fn what_is_saved_is_what_loads_back() {
         let dir = scratch("roundtrip");
-        save(&dir, Settings { minimal_mode: true }).unwrap();
+        save(&dir, Settings { minimal_mode: true, ..Default::default() }).unwrap();
         assert!(load(&dir).settings.minimal_mode);
     }
 
@@ -150,6 +176,6 @@ mod tests {
     #[test]
     fn a_write_that_cannot_happen_is_returned_not_printed() {
         let dir = scratch("unwritable").join("no-such-directory");
-        assert!(save(&dir, Settings { minimal_mode: true }).is_err());
+        assert!(save(&dir, Settings { minimal_mode: true, ..Default::default() }).is_err());
     }
 }

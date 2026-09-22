@@ -216,6 +216,34 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
         .small()
         .color(theme::MUTED),
     );
+
+    ui.add_space(14.0);
+
+    let mut sound_cues = state.settings.sound_cues;
+    if ui.checkbox(&mut sound_cues, "Sound cues").changed() {
+        state.settings.sound_cues = sound_cues;
+        state.settings_write_error = crate::settings::save(data_dir, state.settings).err();
+        if state.settings_write_error.is_none() {
+            state.settings_problem = None;
+        }
+    }
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Play a short, quiet tone when a dictation starts and when it ends. It rises on \
+             the press and falls on the release.",
+        )
+        .small()
+        .color(theme::MUTED),
+    );
+    // Reported here rather than as a startup failure, because no audio output
+    // costs a confirmation sound rather than a dictation. This checkbox is
+    // where someone wondering why they hear nothing will look.
+    if let Some(problem) = &state.cue_problem {
+        ui.add_space(6.0);
+        ui.colored_label(theme::ERROR_TEXT, format!("Cannot play: {problem}"));
+    }
+
     if let Some(error) = &state.settings_write_error {
         ui.add_space(6.0);
         ui.colored_label(theme::ERROR_TEXT, format!("Not saved: {error}"));
@@ -234,7 +262,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
 
 /// Read-only, and reports only what can actually be observed. This tab is for
 /// checking whether things are working, not for changing them; the Settings
-/// tab is where LocalFlow's one setting lives.
+/// tab is where the settings live.
 fn status(
     ui: &mut Ui,
     state: &AppState,

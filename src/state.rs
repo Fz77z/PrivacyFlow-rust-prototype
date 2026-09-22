@@ -259,6 +259,10 @@ pub struct AppState {
     /// Why the last attempt to save failed. Shown beside the control, because
     /// a ticked checkbox that did not save is the interface lying.
     pub settings_write_error: Option<String>,
+    /// Why the cue sounds cannot play, if they cannot. Shown beside their
+    /// checkbox rather than raised as a startup failure: no audio output
+    /// costs the user a confirmation sound, not a dictation.
+    pub cue_problem: Option<String>,
     /// When the capture was handed to the pipeline, while the capsule is
     /// still showing the state before it. The mirror of `done_at`: that one
     /// retires a state after a delay, this one promotes one.
@@ -293,6 +297,7 @@ impl Default for AppState {
             settings: Default::default(),
             settings_problem: None,
             settings_write_error: None,
+            cue_problem: None,
             processing_since: None,
             done_at: None,
             toast: None,

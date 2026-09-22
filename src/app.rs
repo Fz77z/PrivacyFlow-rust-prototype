@@ -181,6 +181,9 @@ enum PipelineMessage {
 pub struct LocalFlowApp {
     state: AppState,
     microphone: Option<Microphone>,
+    /// The press and release sounds. Absent when no output device could be
+    /// opened, which `state.cue_problem` explains.
+    cues: Option<crate::audio::cues::Cues>,
     hotkey_events: HotkeyReceiver<HotkeyEvent>,
     _hotkey: GlobalHotkey,
     /// Where the event tap watches for the pointer, so the capsule can pass
@@ -266,6 +269,14 @@ impl LocalFlowApp {
                 )),
             ),
         };
+        // Opened whatever the setting says, so toggling the checkbox never
+        // has to build a stream while the user is waiting on it. A failure
+        // here is deliberately not joined to the chain below: it costs a
+        // confirmation sound, not a dictation.
+        let (cues, cue_problem) = match crate::audio::cues::Cues::open() {
+            Ok(cues) => (Some(cues), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
         // Settings problems are reported last because the other three stop
         // dictation outright; an unreadable settings file does not.
         let settings_error = settings
@@ -277,6 +288,7 @@ impl LocalFlowApp {
             capsule_non_activating,
             settings: settings.settings,
             settings_problem: settings.problem,
+            cue_problem,
             ..Default::default()
         };
         // Losing this is a functional problem, not a cosmetic one: a capsule
@@ -329,6 +341,7 @@ impl LocalFlowApp {
         Self {
             state,
             microphone,
+            cues,
             hotkey_events,
             pointer_zone: hotkey.pointer_zone(),
             passing_clicks_through: false,
@@ -376,6 +389,7 @@ impl LocalFlowApp {
                 Failure::input_unavailable("Microphone unavailable", error.to_string()));
             return;
         }
+        self.play_cue(crate::audio::cues::Cue::Press);
         self.state.reset_for_recording();
         self.voice_meter.reset();
         self.target_pid = target_pid;
@@ -390,6 +404,18 @@ impl LocalFlowApp {
         }
     }
 
+    /// Play a cue, if the user wants them and there is anything to play them
+    /// through. Returns immediately: the sound starts on the next output
+    /// callback rather than on this thread.
+    fn play_cue(&self, cue: crate::audio::cues::Cue) {
+        if !self.state.settings.sound_cues {
+            return;
+        }
+        if let Some(cues) = &self.cues {
+            cues.play(cue);
+        }
+    }
+
     fn finish_recording(&mut self, ending: CaptureEnd) {
         if self.recording_started.take().is_none() {
             return;
@@ -398,6 +424,10 @@ impl LocalFlowApp {
             return;
         };
         let speech_finished = Instant::now();
+        // Played before the capture is inspected, so a press that turns out
+        // to hold no speech is still confirmed as having ended. The user
+        // released a key; that happened whatever the audio contains.
+        self.play_cue(crate::audio::cues::Cue::Release);
         // Only the microphone stream is stopped here. Draining the capture
         // buffer and encoding the WAV happen on the pipeline thread, so
         // releasing the hotkey never janks the HUD or delays the next press...
