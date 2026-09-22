@@ -78,6 +78,9 @@ pub enum Reply {
     Failed {
         message: String,
         transcript: Option<String>,
+        /// Which recognizer produced `transcript`. Present whenever the
+        /// transcript is, because recognition is what produced both.
+        asr_model: Option<String>,
     },
 }
 
@@ -327,6 +330,7 @@ fn parse_response(line: &str) -> Result<Reply> {
         return Ok(Reply::Failed {
             message: error,
             transcript: response.transcript,
+            asr_model: response.asr_model,
         });
     }
     // Checked after the error and before everything else: a reply that says
@@ -672,7 +676,7 @@ mod tests {
     /// worker is still healthy, and the next dictation must not be poisoned.
     #[test]
     fn a_worker_error_reply_is_reported_and_never_produces_text() {
-        let Reply::Failed { message, transcript } =
+        let Reply::Failed { message, transcript, .. } =
             parse_response(r#"{"error": "COMPLEX processing is not implemented yet"}"#).unwrap()
         else {
             panic!("an error reply is a failure, not a transcript");
@@ -685,7 +689,7 @@ mod tests {
     /// the words with it: they travel back so the app can preserve them.
     #[test]
     fn a_failure_after_recognition_carries_the_words_for_preservation() {
-        let Reply::Failed { message, transcript } = parse_response(
+        let Reply::Failed { message, transcript, .. } = parse_response(
             r#"{"error": "S1-mini returned an empty rewrite", "transcript": "what I said"}"#,
         )
         .unwrap() else {

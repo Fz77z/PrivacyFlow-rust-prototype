@@ -1160,6 +1160,14 @@ fn worth_retaining(inference: &anyhow::Result<Reply>) -> Option<crate::retention
         }),
         Ok(Reply::NoSpeech) => Some(crate::retention::Outcome::NoSpeech),
         Ok(Reply::Unintelligible { .. }) => Some(crate::retention::Outcome::Unintelligible),
+        // Recognition succeeded and something after it refused. The words
+        // exist, so the recording is as good a corpus record as a success; the
+        // refusal is about the route, not the audio.
+        Ok(Reply::Failed { transcript: Some(transcript), asr_model: Some(model), .. }) => {
+            Some(crate::retention::Outcome::Transcribed { transcript, model })
+        }
+        // A failure with no transcript never got as far as recognising, and a
+        // broken worker says nothing about the audio either.
         Ok(Reply::Failed { .. }) | Err(_) => None,
     }
 }
@@ -1276,7 +1284,7 @@ fn process(
         }
         // The pipeline failed after recognising speech. The failure stands,
         // and the words are not thrown away with it.
-        Ok(Reply::Failed { message, transcript }) => {
+        Ok(Reply::Failed { message, transcript, .. }) => {
             let words = transcript.unwrap_or_default();
             let preserved = preserve(&words, || Preserved::Raw);
             return failed(
@@ -1569,9 +1577,19 @@ mod tests {
             worth_retaining(&Ok(Reply::Failed {
                 message: "routing refused".to_owned(),
                 transcript: Some("the words".to_owned()),
+                asr_model: Some("large-v3-turbo".to_owned()),
+            }))
+            .is_some(),
+            "recognition succeeded, so the recording is corpus even though the route refused"
+        );
+        assert!(
+            worth_retaining(&Ok(Reply::Failed {
+                message: "died before recognising".to_owned(),
+                transcript: None,
+                asr_model: None,
             }))
             .is_none(),
-            "a post-recognition failure is outside the retained outcomes"
+            "a failure with no transcript never reached the recogniser"
         );
     }
 
