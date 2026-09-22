@@ -95,16 +95,7 @@ fn border_for(state: &AppState, has_failure: bool) -> Color32 {
 /// between the three fixed sizes. The layout is chosen from the size actually
 /// being drawn rather than the one being animated towards, so a half grown
 /// capsule never paints a label into a shape too small to hold it.
-///
-/// `presence` is how solid the whole capsule is drawn, from 0 to 1. The bead
-/// at rest is drawn faint, so it stays out of the way until the user acts.
-pub fn show(
-    ui: &mut Ui,
-    state: &AppState,
-    time: f64,
-    painted: Vec2,
-    presence: f32,
-) -> CapsuleResponse {
+pub fn show(ui: &mut Ui, state: &AppState, time: f64, painted: Vec2) -> CapsuleResponse {
     // The capsule is centred in its window rather than filling it, and it
     // never quite fills it: the outline is drawn outside the shape, so the
     // shape has to leave the outline somewhere to go. With minimal mode on
@@ -119,15 +110,13 @@ pub fn show(
     let room = ui.max_rect();
     let limit = room.size() - Vec2::splat(EDGE_WIDTH * 2.0);
     let painted = Vec2::new(painted.x.min(limit.x), painted.y.min(limit.y));
-    let rect = Rect::from_center_size(room.center(), painted);
+    let rect = capsule_rect(button_centre(room.center()), painted);
     // Clipped a little wider than the capsule, because the outline sits
     // outside it and would otherwise be cut off at the very edge.
-    let mut painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
-    painter.set_opacity(presence);
+    let painter = ui.painter_at(rect.expand(EDGE_WIDTH * 2.0));
     let failure = failure_for(state);
     // Minimal mode has no outline: the capsule is a plain shape on its
-    // shadow. An unread failure is carried by the menu bar icon, which is
-    // still there when the capsule has hidden.
+    // shadow.
     let outline = (!state.settings.minimal_mode).then(|| border_for(state, failure.is_some()));
     // All three sizes are pills, so the radius is half the height at every
     // point of the animation. Interpolating between three stored radii would
@@ -139,9 +128,7 @@ pub fn show(
     // rectangle the transparent window exists to hide.
     let shadow_room = room.shrink(SHADOW.blur / 2.0 + SHADOW.offset.y.abs());
     if shadow_room.contains_rect(rect) {
-        let mut shadow_painter = ui.painter_at(room);
-        shadow_painter.set_opacity(presence);
-        shadow_painter.add(SHADOW.as_shape(rect, Rounding::same(radius)));
+        ui.painter_at(room).add(SHADOW.as_shape(rect, Rounding::same(radius)));
     }
     // The outline sits outside the fill rather than inside it. Stroking the
     // shape itself puts the line within the capsule, which at bead size eats
@@ -174,27 +161,32 @@ pub fn show(
     let settled = drag_window(ui, &body);
     let mut action = settled.map(CapsuleAction::Moved);
 
-    // How far the capsule has grown towards its full width. The mark slides
-    // and scales across this, and the label and icon fade in over it, so the
-    // contents flow with the shape instead of switching arrangement the
-    // instant it is wide enough. That switch is what made the bars appear to
-    // snap to the left as the capsule opened.
-    let to_full = progress(painted.x, theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
+    // The contents fade in as the capsule grows out of the cog, so they flow
+    // with the shape instead of switching arrangement the instant it is wide
+    // enough: the mark across the growth from the cog to the dictating size,
+    // and the label across the rest of the way to full.
     let mark_rect = mark_rect_for(rect);
-    mark::paint(
-        &painter,
-        mark_rect,
-        &Appearance {
-            state: state.hud,
-            failure: failure.map(|f| f.kind),
-            settled_for: state.done_at.map(|at| at.elapsed().as_secs_f32()),
-        },
-        state.voice_bars,
-        time,
-    );
-    if to_full > 0.0 {
-        paint_label_and_icon(ui, &painter, rect, mark_rect, state, to_full, &mut action);
+    let mark_showing = progress(painted.x, theme::BEAD_SIZE.x, theme::ACTIVE_SIZE.x);
+    if mark_showing > 0.0 {
+        let mut mark_painter = painter.clone();
+        mark_painter.set_opacity(mark_showing);
+        mark::paint(
+            &mark_painter,
+            mark_rect,
+            &Appearance {
+                state: state.hud,
+                failure: failure.map(|f| f.kind),
+                settled_for: state.done_at.map(|at| at.elapsed().as_secs_f32()),
+            },
+            state.voice_bars,
+            time,
+        );
     }
+    let label_showing = progress(painted.x, theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
+    if label_showing > 0.0 {
+        paint_label(ui, &painter, rect, mark_rect, state, label_showing);
+    }
+    paint_cog(ui, &painter, rect, state, &mut action);
 
     body.context_menu(|ui| menu(ui, &mut action));
     CapsuleResponse { action, dragging: body.dragged() || body.drag_started() }
@@ -225,74 +217,75 @@ const SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
 /// mark never touches the border even when it has to be clamped to fit.
 const MARK_INSET: f32 = 3.0;
 
+/// Where the cog sits for a capsule whose window is centred on `centre`: the
+/// cog of the full capsule, centred in the window.
+///
+/// This is the point everything else hangs from. In minimal mode the capsule
+/// rests as just the cog, and every size it grows to keeps the cog here, so
+/// a capsule opened by pointing at the cog never moves out from under the
+/// pointer that opened it.
+pub fn button_centre(centre: Pos2) -> Pos2 {
+    let full = Rect::from_center_size(centre, theme::CAPSULE_SIZE);
+    Pos2::new(full.right() - cog_inset(theme::CAPSULE_SIZE.y), centre.y)
+}
+
+/// How far the cog's centre sits in from the capsule's right end, for a
+/// capsule of the given height: half the height, so the cog is always
+/// centred in the rounded end. At full height that is the full capsule's
+/// padding plus half the icon, which is where the full layout puts it.
+fn cog_inset(height: f32) -> f32 {
+    height / 2.0
+}
+
+/// The capsule's rectangle when painted at `size`, hung from the cog.
+fn capsule_rect(button: Pos2, size: Vec2) -> Rect {
+    let right = button.x + cog_inset(size.y);
+    Rect::from_min_max(
+        Pos2::new(right - size.x, button.y - size.y / 2.0),
+        Pos2::new(right, button.y + size.y / 2.0),
+    )
+}
+
 /// How far `value` has travelled from `from` to `to`, clamped to 0 and 1.
 fn progress(value: f32, from: f32, to: f32) -> f32 {
     ((value - from) / (to - from)).clamp(0.0, 1.0)
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
 /// Where the mark goes, for a capsule painted at any size between the three.
 ///
-/// The mark scales with the capsule's height and slides from centred to the
-/// left as the capsule opens and the label makes room for itself. Both are
-/// continuous,
-/// because the capsule is animated and anything that changes in one step
-/// during that animation reads as a snap, which is exactly what an earlier
-/// arrangement-swapping version did.
+/// The mark sits at the capsule's left end and scales with its height, so it
+/// keeps its place and its proportions as the capsule grows leftwards out of
+/// the cog. It is continuous, because the capsule is animated and anything
+/// that changes in one step during that animation reads as a snap.
 ///
 /// Split out from the painting so the geometry can be tested at every size
 /// the animation passes through, rather than only at the three it rests at.
 fn mark_rect_for(rect: Rect) -> Rect {
-    let to_full = progress(rect.width(), theme::ACTIVE_SIZE.x, theme::CAPSULE_SIZE.x);
-    // The mark scales with the capsule's height, so the widget keeps its
-    // proportions at every point of the animation rather than holding a fixed
-    // mark inside a changing shell.
     let scale = rect.height() / theme::CAPSULE_SIZE.y;
     // Clamped to fit whatever it is being painted into, so the function is
-    // total. Nothing clamps it at the three resting sizes, which are all
-    // built around this mark, but a geometry function that is only correct
-    // for the inputs it happens to be given is a trap for whoever changes the
-    // animation next.
+    // total. At the cog-sized rest the mark is invisible anyway, but a
+    // geometry function that is only correct for the inputs it happens to
+    // be given is a trap for whoever changes the animation next.
     let room = rect.shrink(MARK_INSET);
     let size = Vec2::new(
         (theme::MARK_SIZE.x * scale).min(room.width()),
         (theme::MARK_SIZE.y * scale).min(room.height()),
     );
-    let centre_x = lerp(
-        rect.center().x,
-        rect.left() + theme::PAD_LEFT + size.x / 2.0,
-        to_full,
-    )
-    .clamp(room.left() + size.x / 2.0, room.right() - size.x / 2.0);
-    Rect::from_center_size(Pos2::new(centre_x, rect.center().y), size)
+    let left = (rect.left() + theme::PAD_LEFT * scale)
+        .clamp(room.left(), room.right() - size.x);
+    Rect::from_min_size(Pos2::new(left, rect.center().y - size.y / 2.0), size)
 }
 
-/// The label and the console icon, faded in as the capsule reaches full
-/// width.
-///
-/// `appearing` runs from 0 to 1 across the last part of the growth. The icon
-/// only becomes clickable once it has fully arrived: a half faded icon that
-/// can be clicked is a target the user cannot see well enough to aim at.
-fn paint_label_and_icon(
-    ui: &mut Ui,
+/// The label, faded in as the capsule reaches full width.
+fn paint_label(
+    ui: &Ui,
     painter: &egui::Painter,
     rect: Rect,
     mark_rect: Rect,
     state: &AppState,
     appearing: f32,
-    action: &mut Option<CapsuleAction>,
 ) {
-    let failure = failure_for(state);
-    let fade = |color: Color32| color.gamma_multiply(appearing);
-    let text_left = mark_rect.right() + theme::MARK_GAP;
-    let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - theme::PAD_RIGHT - theme::ICON_SIZE / 2.0, rect.center().y),
-        Vec2::splat(theme::ICON_SIZE),
-    );
-    let (text, font, color) = match failure {
+    let (text, font, color) = match failure_for(state) {
         Some(failure) => (failure.headline, theme::error_font(), theme::ERROR_TEXT),
         None => {
             let (label, color) = hud_label(state.hud, state.processing_label());
@@ -305,19 +298,30 @@ fn paint_label_and_icon(
     // the cog. The whole message is on the cog's tooltip and in the console.
     let label = fitted_label(ui, text, font, label_room());
     painter.galley(
-        Pos2::new(text_left, rect.center().y - label.size().y / 2.0),
+        Pos2::new(mark_rect.right() + theme::MARK_GAP, rect.center().y - label.size().y / 2.0),
         label,
-        fade(color),
+        color.gamma_multiply(appearing),
     );
-    let tint = if failure.is_some() || state.unread_failure {
+}
+
+/// The cog, which opens the console. It is there at every size: in minimal
+/// mode it is the whole of the capsule at rest, and the capsule grows out of
+/// it, so it never fades and is always clickable.
+fn paint_cog(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &AppState,
+    action: &mut Option<CapsuleAction>,
+) {
+    let scale = rect.height() / theme::CAPSULE_SIZE.y;
+    let centre = Pos2::new(rect.right() - cog_inset(rect.height()), rect.center().y);
+    let icon_rect = Rect::from_center_size(centre, Vec2::splat(theme::ICON_SIZE * scale));
+    let tint = if failure_for(state).is_some() || state.unread_failure {
         theme::ICON_ALERT
     } else {
         theme::ICON_TINT
     };
-    if appearing < 1.0 {
-        paint_console_glyph(painter, icon_rect, fade(tint));
-        return;
-    }
 
     let icon = ui.interact(icon_rect, ui.id().with("console"), Sense::click());
     // Hover text comes from the last failure rather than from the capsule's
@@ -328,13 +332,17 @@ fn paint_label_and_icon(
         None => icon.on_hover_text("Open console"),
     };
     if icon.hovered() {
-        painter.rect_filled(icon_rect, Rounding::same(theme::ICON_RADIUS), theme::ICON_HOVER);
+        painter.rect_filled(
+            icon_rect,
+            Rounding::same(theme::ICON_RADIUS * scale),
+            theme::ICON_HOVER,
+        );
     }
     paint_console_glyph(painter, icon_rect, tint);
     if state.unread_failure {
         // Survives the capsule returning to Ready, so a failure that happened
         // while the user was typing elsewhere is still there to be found.
-        let dot = Pos2::new(icon_rect.right() - 8.0, icon_rect.top() + 8.0);
+        let dot = centre + Vec2::new(UNREAD_DOT_OFFSET, -UNREAD_DOT_OFFSET);
         painter.circle_filled(dot, 4.5, theme::FILL);
         painter.circle_filled(dot, 3.5, theme::UNREAD_DOT);
     }
@@ -343,11 +351,14 @@ fn paint_label_and_icon(
         *action = Some(CapsuleAction::ToggleConsole);
     }
     // The icon wins the overlap with the body, so without its own menu the
-    // 36x36 square would be a dead zone for right-clicks. The spec asks for
-    // the menu anywhere on the capsule.
+    // cog would be a dead zone for right-clicks. The spec asks for the menu
+    // anywhere on the capsule.
     icon.context_menu(|ui| menu(ui, action));
 }
 
+/// Where the unread dot sits, up and to the right of the cog's centre, just
+/// clear of its teeth.
+const UNREAD_DOT_OFFSET: f32 = 8.0;
 
 /// What the capsule says in each healthy state, and how loudly.
 fn hud_label(hud: HudState, processing: &'static str) -> (&'static str, Color32) {
@@ -627,19 +638,42 @@ mod tests {
         }
     }
 
-    /// At rest it is centred, which is what makes the bead look like a bead
-    /// rather than like a capsule with its contents pushed to one side.
+    /// The point of hanging the capsule from the cog: whatever size it is
+    /// painted at, the cog is in the same place, so a capsule opened by
+    /// pointing at the cog does not move out from under the pointer, and
+    /// one folding away leaves the cog where the user last saw it.
     #[test]
-    fn the_mark_is_centred_in_the_bead() {
-        let bead = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::BEAD_SIZE);
-        let mark = mark_rect_for(bead);
-        assert_eq!(mark.center().x, bead.center().x);
-        let expected = theme::MARK_SIZE * (theme::BEAD_SIZE.y / theme::CAPSULE_SIZE.y);
+    fn the_cog_stays_put_at_every_size() {
+        let button = button_centre(Pos2::new(500.0, 500.0));
+        for size in [theme::BEAD_SIZE, theme::ACTIVE_SIZE, theme::CAPSULE_SIZE, Vec2::new(150.0, 50.0)] {
+            let rect = capsule_rect(button, size);
+            let cog = Pos2::new(rect.right() - cog_inset(rect.height()), rect.center().y);
+            assert_eq!(cog, button, "the cog moved at {size:?}");
+        }
+    }
+
+    /// Hanging from the cog must not move the full capsule: with the cog in
+    /// its full-size place, the full capsule is centred in its window as it
+    /// always was, so the window, the drag and the toast all still agree.
+    #[test]
+    fn the_full_capsule_is_still_centred_in_its_window() {
+        let centre = Pos2::new(500.0, 500.0);
+        let rect = capsule_rect(button_centre(centre), theme::CAPSULE_SIZE);
+        assert_eq!(rect, Rect::from_center_size(centre, theme::CAPSULE_SIZE));
+    }
+
+    /// While dictating the capsule shows the bars and the cog side by side,
+    /// and the dictating size has to be wide enough that they do not touch.
+    #[test]
+    fn the_dictating_capsule_fits_the_bars_beside_the_cog() {
+        let rect = capsule_rect(button_centre(Pos2::new(500.0, 500.0)), theme::ACTIVE_SIZE);
+        let mark = mark_rect_for(rect);
+        let scale = rect.height() / theme::CAPSULE_SIZE.y;
+        let cog_left = rect.right() - cog_inset(rect.height()) - COG_TOOTH_TIP;
         assert!(
-            (mark.size() - expected).length() < 1e-3,
-            "the mark scales with the capsule, so the widget keeps its proportions: \
-             {:?} against {expected:?}",
-            mark.size()
+            mark.right() + theme::MARK_GAP * scale <= cog_left,
+            "the bars end at {} and the cog starts at {cog_left}",
+            mark.right()
         );
     }
 

@@ -210,8 +210,8 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     ui.add_space(2.0);
     ui.label(
         RichText::new(
-            "Hide the capsule when it is not in use. It appears while you dictate, and \
-             when you rest the pointer where it lives. PrivacyFlow stays in the menu bar.",
+            "Fold the capsule into its settings button when it is not in use. It opens out \
+             of the button while you dictate, and when you point at the button.",
         )
         .small()
         .color(theme::MUTED),

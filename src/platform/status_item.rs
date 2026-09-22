@@ -1,9 +1,8 @@
 //! PrivacyFlow's icon in the menu bar.
 //!
-//! In minimal mode the capsule hides whenever it is not in use, so it can no
-//! longer be the app's only way in. The menu bar icon is the permanent home
-//! instead: it opens the console, quits, and turns red when a dictation has
-//! failed and the user has not yet looked at why.
+//! The app's permanent home, wherever the capsule is and whatever size it is:
+//! it opens the console, quits, and turns red when a dictation has failed
+//! and the user has not yet looked at why.
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -17,8 +16,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 /// What the user picked from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuChoice {
-    /// Bring the hidden capsule up for a moment, so the user can see where
-    /// it lives and move it.
+    /// Open the capsule for a moment, so the user can see where it lives and
+    /// move it.
     ShowCapsule,
     OpenConsole,
     Quit,

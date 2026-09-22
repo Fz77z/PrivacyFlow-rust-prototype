@@ -12,30 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
-/// How long the capsule takes to fade in minimal mode. Quick to appear when
-/// the user presses the key, because it is answering them, and gentle for
-/// everything else: fading away, and the hint fading in and out as the
-/// pointer comes and goes. Opacity has no momentum worth modelling, so these
-/// are plain fades rather than springs.
-const APPEAR_SECONDS: f32 = 0.1;
-const GENTLE_FADE_SECONDS: f32 = 0.3;
+/// How far beyond the resting cog the pointer counts as being on it, so the
+/// small target opens without having to be hit exactly.
+const BUTTON_MARGIN: f32 = 6.0;
 
-/// The part of the screen around the capsule's spot where the hidden capsule
-/// shows a faint hint of itself, so the user can see where it lives when
-/// they are working nearby. Generous on purpose: it answers "where is it?",
-/// which is asked from somewhere in its neighbourhood, not from on top of it.
-const NEARBY_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 320.0);
-
-/// How solid the hint is. Visible enough to spot, faint enough to read as a
-/// hint rather than as the capsule, and it never takes clicks.
-const HINT_PRESENCE: f32 = 0.45;
-
-/// How long the pointer has to rest where the hidden capsule lives before it
-/// appears. Without a pause, every pointer passing across that spot on its
-/// way somewhere else would flash the capsule open over the user's work.
-const REVEAL_DELAY: Duration = Duration::from_millis(300);
-
-/// How long "Show Capsule" in the menu bar keeps the hidden capsule up. Long
+/// How long "Show Capsule" in the menu bar keeps the capsule open. Long
 /// enough to find it on screen and reach it; once the pointer is on it, the
 /// capsule stays for as long as the pointer does.
 const SHOW_ON_REQUEST_FOR: Duration = Duration::from_secs(3);
@@ -212,11 +193,12 @@ pub struct PrivacyFlowApp {
     /// Whether the capsule's window is currently letting clicks through.
     /// Tracked so the command is sent when it changes rather than every frame.
     passing_clicks_through: bool,
-    /// When the pointer arrived where the capsule lives, while it is there.
-    /// The capsule only opens once the pointer has stayed for REVEAL_DELAY.
-    reaching_since: Option<Instant>,
-    /// Until when the capsule is shown because the user asked for it from
-    /// the menu bar, which is the one way to find it while it is hidden.
+    /// Whether the capsule is open because the pointer came to it. Opening
+    /// takes the pointer reaching the cog; staying open only takes it staying
+    /// somewhere on the opened capsule, which is much larger.
+    open_for_pointer: bool,
+    /// Until when the capsule is open because the user asked for it from the
+    /// menu bar.
     shown_on_request_until: Option<Instant>,
     /// PrivacyFlow's icon in the menu bar, and the choices made from its menu.
     status_item: crate::platform::status_item::StatusItem,
@@ -378,7 +360,7 @@ impl PrivacyFlowApp {
             hotkey_events,
             pointer_zone: hotkey.pointer_zone(),
             passing_clicks_through: false,
-            reaching_since: None,
+            open_for_pointer: false,
             shown_on_request_until: None,
             status_item,
             menu_choices,
@@ -618,35 +600,37 @@ impl PrivacyFlowApp {
         self.window_size = wanted;
     }
 
-    /// What the capsule should be painted as, and how solid.
+    /// What size the capsule should be painted at.
     ///
     /// Returns the painted size, which is animated and so is usually between
-    /// the three fixed sizes, and how solid to draw it. The capsule works out
-    /// its own layout from the size.
+    /// the three fixed sizes. The capsule works out its own layout from it.
     ///
     /// The window never changes size. The only thing this asks of it is
     /// whether to let clicks through, which it does whenever the pointer is
     /// not reaching for the capsule. The pointer is therefore read from the
     /// screen, not from egui: a window letting clicks through hears nothing.
-    fn choose_shape(&mut self, ctx: &egui::Context) -> (egui::Vec2, f32) {
+    fn choose_shape(&mut self, ctx: &egui::Context) -> egui::Vec2 {
         let minimal = self.state.settings.minimal_mode;
-        // The rectangle the user is reaching for, on the screen: the full
-        // capsule's footprint around the window's centre. Entering it expands
-        // the capsule. It is measured on the screen rather than inside the
-        // window because the window stops hearing the pointer whenever it is
-        // letting clicks through, and the event tap watching this zone is
-        // what notices the pointer coming back.
-        let reach = ctx
-            .input(|i| i.viewport().outer_rect)
+        // Two places on the screen matter: the cog the capsule rests as, which
+        // opens it, and the full capsule's footprint, which keeps it open.
+        // Both are measured on the screen rather than inside the window,
+        // because the window stops hearing the pointer whenever it is letting
+        // clicks through, and the event tap watching these zones is what
+        // notices the pointer coming back.
+        let window = ctx.input(|i| i.viewport().outer_rect);
+        let reach = window
             .map(|window| egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE));
-        let nearby = ctx
-            .input(|i| i.viewport().outer_rect)
-            .map(|window| egui::Rect::from_center_size(window.center(), NEARBY_SIZE));
+        let button = window.map(|window| {
+            egui::Rect::from_center_size(
+                ui::capsule::button_centre(window.center()),
+                ui::theme::BEAD_SIZE + egui::Vec2::splat(BUTTON_MARGIN * 2.0),
+            )
+        });
         let bounds = |rect: egui::Rect| {
             [rect.left() as f64, rect.top() as f64, rect.right() as f64, rect.bottom() as f64]
         };
         let zones: Vec<[f64; 4]> = if minimal {
-            [reach, nearby].into_iter().flatten().map(bounds).collect()
+            [button, reach].into_iter().flatten().map(bounds).collect()
         } else {
             Vec::new()
         };
@@ -654,23 +638,8 @@ impl PrivacyFlowApp {
         let (x, y) = crate::platform::pointer_in_window_space();
         let pointer = egui::pos2(x as f32, y as f32);
         let reaching = reach.is_some_and(|reach| reach.contains(pointer));
-        let near = nearby.is_some_and(|nearby| nearby.contains(pointer));
-        // A context menu can hang outside the reach, and the capsule must not
-        // shrink or let clicks fall through it while the user is choosing.
-        self.reaching_since = if reaching {
-            Some(self.reaching_since.unwrap_or_else(Instant::now))
-        } else {
-            None
-        };
-        let dwelled = match self.reaching_since {
-            Some(since) if since.elapsed() >= REVEAL_DELAY => true,
-            Some(since) => {
-                // Nothing else wakes the UI while the pointer holds still.
-                ctx.request_repaint_after(REVEAL_DELAY - since.elapsed());
-                false
-            }
-            None => false,
-        };
+        let on_button = button.is_some_and(|button| button.contains(pointer));
+        self.open_for_pointer = on_button || (self.open_for_pointer && reaching);
         let requested = match self.shown_on_request_until {
             Some(until) if Instant::now() < until => {
                 ctx.request_repaint_after(until - Instant::now());
@@ -681,12 +650,19 @@ impl PrivacyFlowApp {
                 false
             }
         };
+        // A context menu can hang outside the reach, and the capsule must not
+        // shrink or let clicks fall through it while the user is choosing.
         let pointing = minimal
-            && (dwelled || requested || self.dragging || ctx.is_context_menu_open());
-        // Everywhere outside the reach is empty window, which used to swallow
-        // every click aimed at whatever was underneath. Until the window's
-        // place on screen is known the zone cannot be watched either, so
-        // clicks are only let through once it is.
+            && (self.open_for_pointer
+                || requested
+                || self.dragging
+                || ctx.is_context_menu_open());
+        // Everywhere the capsule is not open is empty window, which would
+        // otherwise swallow every click aimed at whatever is underneath. The
+        // resting cog still takes its clicks, because the pointer reaching it
+        // opens the capsule first. Until the window's place on screen is
+        // known the zones cannot be watched either, so clicks are only let
+        // through once it is.
         let pass_clicks_through = minimal && reach.is_some() && !pointing;
         if pass_clicks_through != self.passing_clicks_through {
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(pass_clicks_through));
@@ -700,9 +676,9 @@ impl PrivacyFlowApp {
             crate::platform::show_arrow_cursor();
         }
         // Only the recording itself grows the capsule. Once the key is let go
-        // the bead is enough to carry transcribing and the result in colour,
-        // and the hud is not a substitute for this: it stays Listening for a
-        // moment after release, until transcription is worth announcing.
+        // the cog is enough to carry transcribing and the result, and the hud
+        // is not a substitute for this: it stays Listening for a moment after
+        // release, until transcription is worth announcing.
         let recording = self.recording_started.is_some();
         let size = ui::capsule::size_for(minimal, pointing, recording);
         // Sprung rather than tweened, so growing pops open and a change of
@@ -720,25 +696,7 @@ impl PrivacyFlowApp {
         if width_moving || height_moving {
             ctx.request_repaint();
         }
-        // Hidden whenever nothing is happening, except for a faint hint while
-        // the pointer is in the area. An unread failure does not keep it on
-        // screen: the menu bar icon turns red for that instead.
-        let resting =
-            size == ui::capsule::CapsuleSize::Bead && self.state.hud == HudState::Idle;
-        let presence = match (resting, near) {
-            (false, _) => 1.0,
-            (true, true) => HINT_PRESENCE,
-            (true, false) => 0.0,
-        };
-        let presence = ctx.animate_value_with_time(
-            egui::Id::new("capsule_presence"),
-            presence,
-            if resting { GENTLE_FADE_SECONDS } else { APPEAR_SECONDS },
-        );
-        (
-            egui::vec2(self.capsule_width.value(), self.capsule_height.value()),
-            presence,
-        )
+        egui::vec2(self.capsule_width.value(), self.capsule_height.value())
     }
 }
 
@@ -844,7 +802,7 @@ impl eframe::App for PrivacyFlowApp {
         }
 
         self.follow_setting_with_the_window(ctx);
-        let (painted, presence) = self.choose_shape(ctx);
+        let painted = self.choose_shape(ctx);
 
         // A console buried behind other windows is exactly when someone
         // reaches for the menu item, so opening it also raises it.
@@ -866,9 +824,10 @@ impl eframe::App for PrivacyFlowApp {
                 }
             }
         }
-        // The menu bar icon carries an unread failure, because in minimal
-        // mode the capsule is hidden when the failure is most likely to be
-        // missed: after the dictation, while the user is back at work.
+        // The menu bar icon carries an unread failure as well as the cog,
+        // because the failure is most likely to be missed after the
+        // dictation, while the user is back at work and not looking at the
+        // capsule.
         let unread = self.state.unread_failure.then(|| {
             self.state
                 .last_failure
@@ -880,7 +839,7 @@ impl eframe::App for PrivacyFlowApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let response =
-                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted, presence);
+                    ui::capsule::show(ui, &self.state, ui.input(|i| i.time), painted);
                 self.dragging = response.dragging;
                 if let Some(action) = response.action {
                     match action {
