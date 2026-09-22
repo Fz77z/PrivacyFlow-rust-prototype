@@ -2,7 +2,7 @@
 //!
 //! Shaped deliberately like `window_position`: one small file in the app's
 //! data directory, through the serde_json the app already carries, written
-//! when a control changes rather than on quit. LocalFlow has no reliable
+//! when a control changes rather than on quit. PrivacyFlow has no reliable
 //! quit hook to write from, because a frameless window has no menu bar for
 //! Cmd-Q to reach.
 //!
@@ -102,7 +102,7 @@ mod tests {
     /// behind if one ever fails mid-way.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("localflow-settings-{}-{name}", std::process::id()));
+            .join(format!("privacyflow-settings-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

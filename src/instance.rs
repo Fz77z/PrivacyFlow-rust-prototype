@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 
-/// An advisory lock held for the entire lifetime of the LocalFlow process.
+/// An advisory lock held for the entire lifetime of the PrivacyFlow process.
 /// A second instance would install a second HID event tap and race the first
 /// one to paste into whatever application happens to be focused.
 pub struct InstanceLock {
@@ -53,7 +53,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "localflow-instance-test-{}-{unique}",
+            "privacyflow-instance-test-{}-{unique}",
             std::process::id()
         ));
         let _first = InstanceLock::acquire(&path).unwrap();

@@ -2027,31 +2027,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "localflow"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "chrono",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "cpal",
- "crossbeam-channel",
- "dirs",
- "eframe",
- "egui",
- "hound",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "raw-window-handle",
- "rtrb",
- "serde",
- "serde_json",
- "winit",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2866,6 +2841,31 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "privacyflow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "chrono",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "cpal",
+ "crossbeam-channel",
+ "dirs",
+ "eframe",
+ "egui",
+ "hound",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "winit",
+]
 
 [[package]]
 name = "proc-macro-crate"

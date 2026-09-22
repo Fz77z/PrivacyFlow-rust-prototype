@@ -49,12 +49,12 @@ pub fn record(trace: &LatencyTrace<'_>) {
     match opened {
         Ok(mut file) => {
             if let Err(error) = writeln!(file, "{line}") {
-                eprintln!("LocalFlow could not record a latency trace: {error}");
+                eprintln!("PrivacyFlow could not record a latency trace: {error}");
             }
         }
         Err(error) => {
             eprintln!(
-                "LocalFlow could not open {} for latency tracing: {error}",
+                "PrivacyFlow could not open {} for latency tracing: {error}",
                 path.display()
             );
         }

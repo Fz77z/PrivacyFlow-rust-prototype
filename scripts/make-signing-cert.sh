@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create the stable code-signing identity LocalFlow is signed with.
+# Create the stable code-signing identity PrivacyFlow is signed with.
 #
 # Why this exists: an ad-hoc signature has no identity, so macOS falls back
 # to identifying the app by its cdhash, which is a hash of the binary. Every
@@ -15,7 +15,7 @@
 # Run once. It is safe to re-run: it does nothing if the identity exists.
 set -euo pipefail
 
-COMMON_NAME="LocalFlow Self Signed"
+COMMON_NAME="PrivacyFlow Self Signed"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if security find-certificate -c "$COMMON_NAME" "$KEYCHAIN" >/dev/null 2>&1; then
@@ -42,14 +42,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
 openssl pkcs12 -export -legacy \
     -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
     -inkey "$WORK/key.pem" -in "$WORK/cert.pem" \
-    -out "$WORK/identity.p12" -passout pass:localflow \
+    -out "$WORK/identity.p12" -passout pass:privacyflow \
     2>/dev/null
 
 echo "Importing it into your login keychain"
 echo "macOS may ask for your login password. That is expected, and it is"
 echo "asking so that codesign is allowed to use the new key without"
 echo "prompting on every build."
-security import "$WORK/identity.p12" -k "$KEYCHAIN" -P localflow \
+security import "$WORK/identity.p12" -k "$KEYCHAIN" -P privacyflow \
     -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 
 # The identity is checked without -v on purpose. A self-signed certificate
@@ -73,5 +73,5 @@ echo "matching the key by label does not work after a PKCS12 import, and"
 echo "matching it by capability would rewrite the access list of every"
 echo "signing key in your keychain. One dialog is the smaller price."
 echo
-echo "Then rebuild with ./scripts/build-app.sh and grant LocalFlow its"
+echo "Then rebuild with ./scripts/build-app.sh and grant PrivacyFlow its"
 echo "permissions one final time. They will survive rebuilds after that."

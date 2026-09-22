@@ -12,18 +12,18 @@ mod window_position;
 
 fn main() -> eframe::Result<()> {
     let Some(data_root) = dirs::data_local_dir() else {
-        eprintln!("LocalFlow could not determine the macOS local data directory.");
+        eprintln!("PrivacyFlow could not determine the macOS local data directory.");
         return Ok(());
     };
-    let data_dir = data_root.join("LocalFlow");
+    let data_dir = data_root.join("PrivacyFlow");
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("LocalFlow could not create its data directory: {error}");
+        eprintln!("PrivacyFlow could not create its data directory: {error}");
         return Ok(());
     }
-    let _instance_lock = match instance::InstanceLock::acquire(&data_dir.join("localflow.lock")) {
+    let _instance_lock = match instance::InstanceLock::acquire(&data_dir.join("privacyflow.lock")) {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!("LocalFlow will not start: {error:#}");
+            eprintln!("PrivacyFlow will not start: {error:#}");
             return Ok(());
         }
     };
@@ -49,7 +49,7 @@ fn main() -> eframe::Result<()> {
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
-        .with_title("LocalFlow");
+        .with_title("PrivacyFlow");
     if let Some(centre) = remembered {
         // Clamped so the visible capsule lands on screen, not so the whole
         // catchment does. The catchment's outer ring is never painted, and
@@ -79,10 +79,10 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "LocalFlow",
+        "PrivacyFlow",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::LocalFlowApp::new(cc, data_dir.clone(), settings.clone())))
+            Ok(Box::new(app::PrivacyFlowApp::new(cc, data_dir.clone(), settings.clone())))
         }),
     )
 }

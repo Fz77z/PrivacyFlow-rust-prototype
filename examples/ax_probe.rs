@@ -88,7 +88,7 @@ unsafe fn settable(element: AXUIElementRef, name: &str) -> Result<bool, AXError>
 /// One line describing the focused element of the given process.
 ///
 /// Times the query, because how long an application takes to answer is the
-/// thing that decides what messaging timeout LocalFlow can afford.
+/// thing that decides what messaging timeout PrivacyFlow can afford.
 unsafe fn describe(pid: i32) -> String {
     let application = AXUIElementCreateApplication(pid);
     if application.is_null() {

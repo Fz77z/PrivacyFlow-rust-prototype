@@ -70,7 +70,7 @@ const AX_TIMEOUT_SECONDS: f32 = 1.0;
 /// Some expose no accessibility tree at all and answer nothing, and their
 /// silence is not a refusal: it means the question could not be asked, not
 /// that the answer is no. Collapsing `Unknown` into `NotEditable` would stop
-/// LocalFlow pasting into every such application, which is a large and silent
+/// PrivacyFlow pasting into every such application, which is a large and silent
 /// regression for the applications least able to report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusedField {
@@ -133,7 +133,7 @@ pub fn focused_field(pid: i32) -> FocusedField {
     }
 }
 
-/// Whether macOS will actually deliver the synthetic keystrokes LocalFlow
+/// Whether macOS will actually deliver the synthetic keystrokes PrivacyFlow
 /// uses to paste.
 ///
 /// This has to be asked rather than inferred from the result of posting an
@@ -145,7 +145,7 @@ pub fn can_synthesize_input() -> bool {
 }
 
 /// Whether an observed event could have put the text cursor somewhere other
-/// than where LocalFlow last left it.
+/// than where PrivacyFlow last left it.
 ///
 /// Only presses count. A pointer crossing the screen moves nothing, and Right
 /// Option arrives as a flags change rather than a key press, so holding push
@@ -224,7 +224,7 @@ impl PointerZone {
 /// hotkey crates and leaving the key event untouched for the operating system.
 ///
 /// The same tap also reports whether the user has pressed or clicked anything,
-/// which is how LocalFlow knows its memory of the cursor has gone stale. The
+/// which is how PrivacyFlow knows its memory of the cursor has gone stale. The
 /// events are counted, never inspected: nothing reads a key code from them.
 #[derive(Default)]
 pub struct GlobalHotkey {
@@ -278,7 +278,7 @@ impl GlobalHotkey {
         // A HID event-tap callback must never wait for egui's repaint lock.
         // Forward events and request a repaint from an ordinary thread instead.
         std::thread::Builder::new()
-            .name("localflow-hotkey-forwarder".into())
+            .name("privacyflow-hotkey-forwarder".into())
             .spawn(move || {
                 while let Ok(event) = tap_rx.recv() {
                     if event_tx.send(event).is_err() {
@@ -290,7 +290,7 @@ impl GlobalHotkey {
             .context("Could not start macOS hotkey forwarder")?;
 
         std::thread::Builder::new()
-            .name("localflow-hotkey".into())
+            .name("privacyflow-hotkey".into())
             .spawn(move || {
                 let run_loop = CFRunLoop::get_current();
                 // Re-enabling a disabled tap needs the tap's own mach port,
@@ -342,7 +342,7 @@ impl GlobalHotkey {
                             return None;
                         }
                         // Recorded without reading the event: the only thing
-                        // LocalFlow wants to know is that the user touched
+                        // PrivacyFlow wants to know is that the user touched
                         // something, never what they touched.
                         if moves_the_cursor(event_type) {
                             observed_movement.record();
@@ -520,7 +520,7 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     // that every path from here on leaves the user holding their words. An
     // earlier version checked the permission first and returned without
     // writing, which meant the one case where the user most needed the
-    // transcript, the case where LocalFlow could not place it for them, was
+    // transcript, the case where PrivacyFlow could not place it for them, was
     // the case that threw it away.
     copy_to_pasteboard(text)?;
     // Reported as a failure rather than as CopiedOnly, even though the words
@@ -530,9 +530,9 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
     // message that says how to repair it.
     if !can_synthesize_input() {
         return Err(anyhow!(
-            "LocalFlow is not allowed to send keystrokes, so the text could not be \
+            "PrivacyFlow is not allowed to send keystrokes, so the text could not be \
              pasted. It is on your clipboard: press Cmd-V to place it. To fix this \
-             permanently, add LocalFlow to System Settings, Privacy and Security, \
+             permanently, add PrivacyFlow to System Settings, Privacy and Security, \
              Accessibility, then quit and relaunch it."
         ));
     }
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_and_clicking_put_the_cursor_somewhere_localflow_does_not_know() {
+    fn typing_and_clicking_put_the_cursor_somewhere_privacyflow_does_not_know() {
         assert!(moves_the_cursor(CGEventType::KeyDown));
         assert!(moves_the_cursor(CGEventType::LeftMouseDown));
         assert!(moves_the_cursor(CGEventType::RightMouseDown));

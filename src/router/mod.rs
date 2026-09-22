@@ -112,7 +112,7 @@ impl KevWorker {
         // disconnects the channel and surfaces as an explicit error below...
         let (response_tx, responses) = crossbeam_channel::unbounded();
         std::thread::Builder::new()
-            .name("localflow-worker-reader".into())
+            .name("privacyflow-worker-reader".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else {
@@ -170,7 +170,7 @@ impl KevWorker {
         }
 
         if let Some(reason) = &self.fatal {
-            return Err(anyhow!("{reason}. Quit and reopen LocalFlow."));
+            return Err(anyhow!("{reason}. Quit and reopen PrivacyFlow."));
         }
         if let Err(error) = self.write_request(&Request { prepare: true }) {
             return Err(self.poison(format!(
@@ -202,7 +202,7 @@ impl KevWorker {
         }
 
         if let Some(reason) = &self.fatal {
-            return Err(anyhow!("{reason}. Quit and reopen LocalFlow."));
+            return Err(anyhow!("{reason}. Quit and reopen PrivacyFlow."));
         }
         let path = audio_path
             .to_str()
@@ -244,7 +244,7 @@ impl KevWorker {
     /// immediately with the same explanation instead of hanging again.
     fn poison(&mut self, reason: String) -> anyhow::Error {
         let _ = self.child.kill();
-        let error = anyhow!("{reason}. Quit and reopen LocalFlow.");
+        let error = anyhow!("{reason}. Quit and reopen PrivacyFlow.");
         self.fatal = Some(reason);
         error
     }
@@ -420,10 +420,10 @@ impl WorkerShutdown {
 ///
 /// This was once resolved with `env!("CARGO_MANIFEST_DIR")`, which the
 /// compiler bakes in as the directory the binary was built in. That worked
-/// only while LocalFlow ran from its own checkout, and broke silently the
+/// only while PrivacyFlow ran from its own checkout, and broke silently the
 /// moment either the app or the research repository moved.
 pub(crate) fn research_root() -> Result<PathBuf> {
-    let override_path = std::env::var_os("LOCALFLOW_RESEARCH_ROOT").map(PathBuf::from);
+    let override_path = std::env::var_os("PRIVACYFLOW_RESEARCH_ROOT").map(PathBuf::from);
     resolve_research_root(override_path, dirs::home_dir())
 }
 
@@ -436,12 +436,12 @@ fn resolve_research_root(
         return Ok(path);
     }
     let home =
-        home.ok_or_else(|| anyhow!("LocalFlow could not determine the macOS home directory"))?;
+        home.ok_or_else(|| anyhow!("PrivacyFlow could not determine the macOS home directory"))?;
     Ok(home.join("Desktop").join("localflow-research"))
 }
 
-/// The two files LocalFlow requires from the research checkout. This is a
-/// contract with that project: if either moves, LocalFlow must say so
+/// The two files PrivacyFlow requires from the research checkout. This is a
+/// contract with that project: if either moves, PrivacyFlow must say so
 /// clearly rather than starting a worker that cannot run.
 pub(crate) fn runtime_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
     let python = root.join(".venv-kev/bin/python");
@@ -452,8 +452,8 @@ pub(crate) fn runtime_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
     ] {
         if !path.is_file() {
             return Err(anyhow!(
-                "LocalFlow could not find {relative} in the research runtime at {}. \
-                 Set LOCALFLOW_RESEARCH_ROOT if the checkout is somewhere else.",
+                "PrivacyFlow could not find {relative} in the research runtime at {}. \
+                 Set PRIVACYFLOW_RESEARCH_ROOT if the checkout is somewhere else.",
                 root.display()
             ));
         }
@@ -502,7 +502,7 @@ mod tests {
             .transcribe_and_route(Path::new("/tmp/never-read.wav"), Duration::from_secs(3))
             .unwrap_err()
             .to_string();
-        assert!(after.contains("Quit and reopen LocalFlow"), "{after}");
+        assert!(after.contains("Quit and reopen PrivacyFlow"), "{after}");
     }
 
     /// The acknowledgement is consumed, so the next reply the pipeline reads
@@ -533,7 +533,7 @@ mod tests {
         response_tx.send(PASS_THROUGH_REPLY.to_owned()).unwrap();
 
         let error = worker.prepare().unwrap_err().to_string();
-        assert!(error.contains("Quit and reopen LocalFlow"), "{error}");
+        assert!(error.contains("Quit and reopen PrivacyFlow"), "{error}");
         assert!(!error.contains("written using the dictation"), "{error}");
         assert!(worker.fatal.is_some());
     }
@@ -709,9 +709,9 @@ mod tests {
     /// environment variable. None does today. Check that before adding one.
     #[test]
     fn the_documented_override_variable_is_the_one_actually_read() {
-        std::env::set_var("LOCALFLOW_RESEARCH_ROOT", "/tmp/override-probe");
+        std::env::set_var("PRIVACYFLOW_RESEARCH_ROOT", "/tmp/override-probe");
         let resolved = research_root();
-        std::env::remove_var("LOCALFLOW_RESEARCH_ROOT");
+        std::env::remove_var("PRIVACYFLOW_RESEARCH_ROOT");
         assert_eq!(resolved.unwrap(), PathBuf::from("/tmp/override-probe"));
     }
 
@@ -726,13 +726,13 @@ mod tests {
     }
 
     /// A wrong path used to produce a worker that could not start, with nothing
-    /// saying where LocalFlow had looked. The message must name the file, and
+    /// saying where PrivacyFlow had looked. The message must name the file, and
     /// it must name the right one: both entries of the contract are checked,
     /// because a regression that reported the wrong `relative` string would be
     /// invisible if only one arm were exercised.
     #[test]
     fn a_missing_runtime_file_is_named_in_the_error() {
-        let dir = std::env::temp_dir().join(format!("localflow-root-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("privacyflow-root-{}", std::process::id()));
         // Removed before every assertion, so a failing one cannot leak it...
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".venv-kev/bin")).unwrap();

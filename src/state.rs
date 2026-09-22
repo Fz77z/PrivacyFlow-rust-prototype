@@ -68,11 +68,11 @@ pub struct Timings {
 /// mark answers "was anything lost?" before the words are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
-    /// A precondition was not met and LocalFlow never started listening.
+    /// A precondition was not met and PrivacyFlow never started listening.
     /// Nothing was captured, so nothing was lost.
     Blocked,
     /// The microphone cannot be used at all. Nothing was lost, but pressing
-    /// again will not help; the remedy is outside LocalFlow.
+    /// again will not help; the remedy is outside PrivacyFlow.
     InputUnavailable,
     /// Capture began and the pipeline failed before text reached the cursor.
     /// The only kind where the user spoke and the words did not come back.
@@ -127,7 +127,7 @@ pub enum ToastKind {
     Quiet,
 }
 
-/// What LocalFlow says when a dictation ends up on the clipboard instead of
+/// What PrivacyFlow says when a dictation ends up on the clipboard instead of
 /// at the cursor.
 ///
 /// The capsule already shows these outcomes, but only as one word, for 1.4
@@ -164,7 +164,7 @@ impl Toast {
     fn quiet() -> Self {
         Self {
             kind: ToastKind::Quiet,
-            headline: "LocalFlow can barely hear you".to_owned(),
+            headline: "PrivacyFlow can barely hear you".to_owned(),
             body: "This dictation is too quiet to be transcribed. Move closer \
                    to the microphone, or speak up."
                 .to_owned(),
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(state.worker, WorkerStatus::Starting);
     }
 
-    /// Activity is what happened and Settings is what LocalFlow does, so the
+    /// Activity is what happened and Settings is what PrivacyFlow does, so the
     /// console must still open on Activity: adding a tab must not change
     /// which one a user lands on when they follow the unread dot.
     #[test]

@@ -167,7 +167,7 @@ fn why_copied(insertion: Option<crate::platform::Insertion>) -> Option<&'static 
     }
 }
 
-/// One setting. The tab is thin because LocalFlow has one thing to configure,
+/// One setting. The tab is thin because PrivacyFlow has one thing to configure,
 /// and it should look thin rather than be padded out with controls that do
 /// not exist.
 fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Path) {
@@ -185,7 +185,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(
-                        "LocalFlow started on its defaults. The file is left as it is until \
+                        "PrivacyFlow started on its defaults. The file is left as it is until \
                          you change a setting here.",
                     )
                     .small()
@@ -211,7 +211,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     ui.label(
         RichText::new(
             "Hide the capsule when it is not in use. It appears while you dictate, and \
-             when you rest the pointer where it lives. LocalFlow stays in the menu bar.",
+             when you rest the pointer where it lives. PrivacyFlow stays in the menu bar.",
         )
         .small()
         .color(theme::MUTED),
@@ -255,7 +255,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     ui.add_space(28.0);
     ui.separator();
     ui.add_space(10.0);
-    if ui.button("Quit LocalFlow").clicked() {
+    if ui.button("Quit PrivacyFlow").clicked() {
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
     }
 }
@@ -301,7 +301,7 @@ fn status(
         ("Allowed to send keystrokes".to_owned(), theme::LABEL)
     } else {
         (
-            "Not allowed - add LocalFlow to Accessibility, then relaunch".to_owned(),
+            "Not allowed - add PrivacyFlow to Accessibility, then relaunch".to_owned(),
             theme::ERROR_TEXT,
         )
     };

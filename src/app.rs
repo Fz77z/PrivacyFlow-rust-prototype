@@ -116,10 +116,10 @@ enum Destination {
 ///
 /// The two reasons a dictation does not get pasted are deliberately kept
 /// apart. Having nowhere to put the text is an ordinary thing that happens
-/// when the user dictates with LocalFlow's own window in front, or with
+/// when the user dictates with PrivacyFlow's own window in front, or with
 /// nothing focused at all, and refusing it was worse than answering it. A
 /// capture cut short by the ceiling or the buffer is a dictation the user did
-/// not finish, and calling that a success would claim something LocalFlow did
+/// not finish, and calling that a success would claim something PrivacyFlow did
 /// not do.
 fn destination(target_pid: Option<i32>, capture_end: CaptureEnd) -> Destination {
     if !capture_end.may_insert() {
@@ -198,7 +198,7 @@ enum PipelineMessage {
     },
 }
 
-pub struct LocalFlowApp {
+pub struct PrivacyFlowApp {
     state: AppState,
     microphone: Option<Microphone>,
     /// The press and release sounds. Absent when no output device could be
@@ -218,7 +218,7 @@ pub struct LocalFlowApp {
     /// Until when the capsule is shown because the user asked for it from
     /// the menu bar, which is the one way to find it while it is hidden.
     shown_on_request_until: Option<Instant>,
-    /// LocalFlow's icon in the menu bar, and the choices made from its menu.
+    /// PrivacyFlow's icon in the menu bar, and the choices made from its menu.
     status_item: crate::platform::status_item::StatusItem,
     menu_choices: std::sync::mpsc::Receiver<crate::platform::status_item::MenuChoice>,
     work_tx: Sender<Work>,
@@ -255,7 +255,7 @@ pub struct LocalFlowApp {
     voice_meter: ui::meter::VoiceMeter,
 }
 
-impl LocalFlowApp {
+impl PrivacyFlowApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         data_dir: PathBuf,
@@ -405,7 +405,7 @@ impl LocalFlowApp {
         if matches!(self.state.hud, HudState::Listening | HudState::Processing) {
             return;
         }
-        // LocalFlow's own window is not a destination, and neither is no
+        // PrivacyFlow's own window is not a destination, and neither is no
         // window at all. Neither is refused: the dictation runs, and what it
         // produces goes to the clipboard with a notice, which is what the
         // user wanted from pressing the key. Refusing here used to throw the
@@ -415,7 +415,7 @@ impl LocalFlowApp {
         let Some(microphone) = &self.microphone else {
             self.fail_locally("start_recording", Failure::input_unavailable(
                 "Microphone unavailable",
-                "The microphone is unavailable; restart LocalFlow",
+                "The microphone is unavailable; restart PrivacyFlow",
             ));
             return;
         };
@@ -501,7 +501,7 @@ impl LocalFlowApp {
                     // about whether there is speech in there. The capture
                     // goes on to the pipeline, which measures it again on its
                     // own terms.
-                    Err(error) => eprintln!("LocalFlow could not measure a capture: {error:#}"),
+                    Err(error) => eprintln!("PrivacyFlow could not measure a capture: {error:#}"),
                 }
                 self.state.begin_processing();
                 // A buffer that filled is still a dictation, just a shortened
@@ -742,7 +742,7 @@ impl LocalFlowApp {
     }
 }
 
-impl eframe::App for LocalFlowApp {
+impl eframe::App for PrivacyFlowApp {
     /// The capsule paints its own shape into a transparent window, so the
     /// window itself must contribute nothing. eframe's default clear colour
     /// is a 70% opaque near-black across the whole viewport, which would show
@@ -934,7 +934,7 @@ impl eframe::App for LocalFlowApp {
 
         if self.state.console_open {
             let builder = egui::ViewportBuilder::default()
-                .with_title("LocalFlow")
+                .with_title("PrivacyFlow")
                 .with_inner_size([640.0, 520.0])
                 .with_min_inner_size([520.0, 400.0]);
             let data_dir = self.data_dir.clone();
@@ -972,7 +972,7 @@ fn start_pipeline_worker(
     cursor_moved: CursorMoved,
 ) {
     std::thread::Builder::new()
-        .name("localflow-pipeline".into())
+        .name("privacyflow-pipeline".into())
         .spawn(move || {
             // The Python process loads mlx-whisper and the exact pool_300 Kev
             // checkpoint once, then remains resident for the app lifetime.
@@ -1019,7 +1019,7 @@ fn start_pipeline_worker(
                 }
             }
         })
-        .expect("Could not start LocalFlow pipeline worker");
+        .expect("Could not start PrivacyFlow pipeline worker");
 }
 
 /// Everything a finished dictation contributes to the latency dataset, or
@@ -1035,7 +1035,7 @@ fn latency_trace_for(
         Outcome::Inserted(Insertion::Pasted) => "inserted",
         Outcome::Inserted(Insertion::CopiedOnly) => "copied",
         // Kept apart from "copied": one means the user switched away, the
-        // other means LocalFlow declined to paste, and a trace that merged
+        // other means PrivacyFlow declined to paste, and a trace that merged
         // them could not tell which of the two the new check is causing.
         Outcome::Inserted(Insertion::CopiedNoField) => "copied_no_field",
         Outcome::Failed(_) => "failed",
@@ -1044,7 +1044,7 @@ fn latency_trace_for(
 }
 
 /// Utterance audio is temporary, but a crash or a force quit leaves the last
-/// WAV behind. The instance lock guarantees no other LocalFlow is running, so
+/// WAV behind. The instance lock guarantees no other PrivacyFlow is running, so
 /// anything still here belongs to a previous run and must not outlive it.
 fn sweep_audio_cache(dir: &Path) {
     let entries = match std::fs::read_dir(dir) {
@@ -1053,7 +1053,7 @@ fn sweep_audio_cache(dir: &Path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
             eprintln!(
-                "LocalFlow could not read its audio cache at {}: {error}",
+                "PrivacyFlow could not read its audio cache at {}: {error}",
                 dir.display()
             );
             return;
@@ -1063,7 +1063,7 @@ fn sweep_audio_cache(dir: &Path) {
         let path = entry.path();
         if let Err(error) = std::fs::remove_file(&path) {
             eprintln!(
-                "LocalFlow could not delete leftover audio at {}: {error}",
+                "PrivacyFlow could not delete leftover audio at {}: {error}",
                 path.display()
             );
         }
@@ -1081,7 +1081,7 @@ fn prepare(worker: &mut Result<KevWorker, String>) {
         return;
     };
     if let Err(error) = worker.prepare() {
-        eprintln!("LocalFlow could not prepare the router for this dictation: {error:#}");
+        eprintln!("PrivacyFlow could not prepare the router for this dictation: {error:#}");
     }
 }
 
@@ -1145,7 +1145,7 @@ fn process(
     // delete it is a broken promise rather than a detail to swallow.
     if let Err(error) = std::fs::remove_file(&audio.path) {
         eprintln!(
-            "LocalFlow could not delete {} after transcription: {error}",
+            "PrivacyFlow could not delete {} after transcription: {error}",
             audio.path.display()
         );
     }
@@ -1409,7 +1409,7 @@ mod tests {
     /// WAV the previous run was still holding.
     #[test]
     fn startup_deletes_audio_left_behind_by_a_previous_run() {
-        let dir = std::env::temp_dir().join(format!("localflow-sweep-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("privacyflow-sweep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let leftover = dir.join("utterance-20260921T000000.000Z.wav");
         std::fs::write(&leftover, b"leftover audio").unwrap();

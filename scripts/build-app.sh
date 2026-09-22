@@ -1,14 +1,14 @@
 #!/bin/bash
-# Assemble LocalFlow.app around the release binary and install it.
+# Assemble PrivacyFlow.app around the release binary and install it.
 #
-# LocalFlow is installed to a stable path on purpose. macOS grants
+# PrivacyFlow is installed to a stable path on purpose. macOS grants
 # Accessibility, Input Monitoring and Microphone per executable identity, so
 # a binary living inside target/ is re-prompted every time it is rebuilt.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAGE="$ROOT/target/LocalFlow.app"
-INSTALL="/Applications/LocalFlow.app"
+STAGE="$ROOT/target/PrivacyFlow.app"
+INSTALL="/Applications/PrivacyFlow.app"
 VERSION="$(awk -F'"' '/^version = /{print $2; exit}' "$ROOT/Cargo.toml")"
 
 # awk exits 0 when it matches nothing, so an empty VERSION would sail through
@@ -20,7 +20,7 @@ if [[ ! "$VERSION" =~ ^[0-9A-Za-z.+-]+$ ]]; then
     exit 1
 fi
 
-echo "Building LocalFlow $VERSION"
+echo "Building PrivacyFlow $VERSION"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
 # Assemble from scratch every time. Merging into an existing bundle can leave
@@ -30,7 +30,7 @@ mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
 sed "s/VERSION_PLACEHOLDER/$VERSION/g" "$ROOT/bundle/Info.plist" \
     > "$STAGE/Contents/Info.plist"
-cp "$ROOT/target/release/localflow" "$STAGE/Contents/MacOS/localflow"
+cp "$ROOT/target/release/privacyflow" "$STAGE/Contents/MacOS/privacyflow"
 
 ICONSET="$ROOT/target/AppIcon.iconset"
 rm -rf "$ICONSET"
@@ -56,7 +56,7 @@ iconutil -c icns "$ICONSET" -o "$STAGE/Contents/Resources/AppIcon.icns"
 # Accessibility, Input Monitoring and Microphone grants have to be given
 # again. This is not about trust or distribution; it is about this machine
 # recognising successive builds as the same program.
-SIGNING_IDENTITY="LocalFlow Self Signed"
+SIGNING_IDENTITY="PrivacyFlow Self Signed"
 if ! security find-identity -p codesigning | grep -q "$SIGNING_IDENTITY"; then
     echo "No \"$SIGNING_IDENTITY\" code-signing identity found." >&2
     echo "Run ./scripts/make-signing-cert.sh once to create it." >&2

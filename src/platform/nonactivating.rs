@@ -1,7 +1,7 @@
 //! Stop the capsule taking keyboard focus when it is clicked or dragged.
 //!
 //! The capsule floats over whatever you are writing in. Clicking it to drag
-//! it, or to open the console, used to make LocalFlow the active application,
+//! it, or to open the console, used to make PrivacyFlow the active application,
 //! which meant the next dictation had nowhere to go and failed with "No text
 //! field focused". The user had to click back into their document first,
 //! every time.
@@ -15,7 +15,7 @@
 //! because it was read out of the shipped framework rather than guessed at.
 //! Its class `ElectronNSWindow` carries a `disableKeyOrMainWindow` flag and
 //! overrides exactly those two methods. Electron can do that at construction
-//! because it creates its own window. LocalFlow's window belongs to winit.
+//! because it creates its own window. PrivacyFlow's window belongs to winit.
 //!
 //! ## Why this does not change the window's class
 //!
@@ -25,7 +25,7 @@
 //!
 //! ```text
 //! Cannot remove an observer <WinitWindowDelegate> for the key path
-//! "effectiveAppearance" from <LocalFlowNonActivatingWindow> because it is
+//! "effectiveAppearance" from <PrivacyFlowNonActivatingWindow> because it is
 //! not registered as an observer.
 //! ```
 //!

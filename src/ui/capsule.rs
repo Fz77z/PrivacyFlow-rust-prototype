@@ -496,7 +496,7 @@ fn menu(ui: &mut Ui, action: &mut Option<CapsuleAction>) {
         *action = Some(CapsuleAction::OpenConsole);
         ui.close_menu();
     }
-    if ui.button("Quit LocalFlow").clicked() {
+    if ui.button("Quit PrivacyFlow").clicked() {
         *action = Some(CapsuleAction::Quit);
         ui.close_menu();
     }

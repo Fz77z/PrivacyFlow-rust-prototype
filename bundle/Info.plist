@@ -5,11 +5,11 @@
     <key>CFBundleIdentifier</key>
     <string>com.privacy.dictation</string>
     <key>CFBundleName</key>
-    <string>LocalFlow</string>
+    <string>PrivacyFlow</string>
     <key>CFBundleDisplayName</key>
-    <string>LocalFlow</string>
+    <string>PrivacyFlow</string>
     <key>CFBundleExecutable</key>
-    <string>localflow</string>
+    <string>privacyflow</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -25,6 +25,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>LocalFlow transcribes your dictation on this Mac. Audio is deleted as soon as it has been transcribed and is never sent anywhere.</string>
+    <string>PrivacyFlow transcribes your dictation on this Mac. Audio is deleted as soon as it has been transcribed and is never sent anywhere.</string>
 </dict>
 </plist>

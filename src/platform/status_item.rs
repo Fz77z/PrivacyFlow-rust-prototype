@@ -1,4 +1,4 @@
-//! LocalFlow's icon in the menu bar.
+//! PrivacyFlow's icon in the menu bar.
 //!
 //! In minimal mode the capsule hides whenever it is not in use, so it can no
 //! longer be the app's only way in. The menu bar icon is the permanent home
@@ -36,7 +36,7 @@ define_class!(
     // not implement Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "LocalFlowMenuTarget"]
+    #[name = "PrivacyFlowMenuTarget"]
     #[ivars = Ivars]
     struct MenuTarget;
 
@@ -121,18 +121,18 @@ impl StatusItem {
         // light and dark mode and inverts it while the menu is open.
         let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str("waveform"),
-            Some(&NSString::from_str("LocalFlow")),
+            Some(&NSString::from_str("PrivacyFlow")),
         )
-        .expect("the waveform symbol ships with every macOS LocalFlow runs on");
+        .expect("the waveform symbol ships with every macOS PrivacyFlow runs on");
         icon.setTemplate(true);
         button.setImage(Some(&icon));
-        button.setToolTip(Some(&NSString::from_str("LocalFlow")));
+        button.setToolTip(Some(&NSString::from_str("PrivacyFlow")));
 
         let menu = NSMenu::new(mtm);
         menu.addItem(&menu_item(mtm, &target, "Show Capsule", sel!(showCapsule:), ""));
         menu.addItem(&menu_item(mtm, &target, "Open Console", sel!(openConsole:), ""));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        menu.addItem(&menu_item(mtm, &target, "Quit LocalFlow", sel!(quit:), "q"));
+        menu.addItem(&menu_item(mtm, &target, "Quit PrivacyFlow", sel!(quit:), "q"));
         item.setMenu(Some(&menu));
 
         (Self { item, _target: target, shown_alert: None }, received)
@@ -151,8 +151,8 @@ impl StatusItem {
         let tint = detail.map(|_| NSColor::systemRedColor());
         button.setContentTintColor(tint.as_deref());
         let tooltip = match detail {
-            Some(detail) => format!("LocalFlow: {detail}"),
-            None => "LocalFlow".to_owned(),
+            Some(detail) => format!("PrivacyFlow: {detail}"),
+            None => "PrivacyFlow".to_owned(),
         };
         button.setToolTip(Some(&NSString::from_str(&tooltip)));
     }

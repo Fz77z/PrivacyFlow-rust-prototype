@@ -37,7 +37,7 @@ const TARGET_BUFFER_FRAMES: u32 = 128;
 /// the first moments of speech. Paying it once at startup means a keypress
 /// only has to restart an already-built stream.
 ///
-/// The stream is paused whenever LocalFlow is not recording, so the
+/// The stream is paused whenever PrivacyFlow is not recording, so the
 /// microphone is not live between dictations, and it is not live before the
 /// first one either. That last part takes an explicit pause: cpal's CoreAudio
 /// backend calls `AudioOutputUnitStart` inside `build_input_stream`, so a
@@ -90,7 +90,7 @@ impl Microphone {
         let callback_recorded = recorded.clone();
         let overflowed = Arc::new(AtomicBool::new(false));
         let callback_overflowed = overflowed.clone();
-        let err_fn = |err| eprintln!("LocalFlow audio stream error: {err}");
+        let err_fn = |err| eprintln!("PrivacyFlow audio stream error: {err}");
 
         let mut config: cpal::StreamConfig = supported.clone().into();
         config.buffer_size = buffer_size;
@@ -216,7 +216,7 @@ impl Microphone {
 
     /// The device actually being recorded from.
     ///
-    /// Reported in the console because LocalFlow follows the system input,
+    /// Reported in the console because PrivacyFlow follows the system input,
     /// and the system input changing under you is otherwise invisible: a
     /// Bluetooth headset that is also your output will be forced out of its
     /// high quality profile every time you dictate, and nothing on screen
@@ -293,7 +293,7 @@ impl RecordedLevel {
     }
 }
 
-/// How long a press must be held before LocalFlow says anything about it
+/// How long a press must be held before PrivacyFlow says anything about it
 /// being quiet.
 ///
 /// A warning is only worth showing while the user can still act on it. Shorter
@@ -629,7 +629,7 @@ mod tests {
     /// ever handed a path.
     #[test]
     fn a_refused_capture_writes_no_file_at_all() {
-        let dir = std::env::temp_dir().join(format!("localflow-quiet-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("privacyflow-quiet-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let silence = vec![0.0f32; 16_000];
         let (mut producer, consumer) = RingBuffer::new(silence.len());
@@ -672,7 +672,7 @@ mod tests {
         assert!(matches!(capture.inspect().unwrap(), Verdict::Speech { .. }));
         assert!(matches!(capture.inspect().unwrap(), Verdict::Speech { .. }));
 
-        let dir = std::env::temp_dir().join(format!("localflow-peek-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("privacyflow-peek-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         match capture.finish(&dir).unwrap() {
             Finished::Recorded(audio) => {

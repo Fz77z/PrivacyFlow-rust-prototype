@@ -51,7 +51,7 @@ fn needs_leading_space(previous: char, before_previous: Option<char>) -> bool {
 /// after, adding a separating space when the join would otherwise run two
 /// words together.
 ///
-/// `previous` is `None` when LocalFlow has no idea what precedes the cursor,
+/// `previous` is `None` when PrivacyFlow has no idea what precedes the cursor,
 /// which is the common case: the first dictation into a field, or any
 /// dictation after the user has typed or clicked. No information means no
 /// modification, so the transcript is inserted exactly as it arrived rather
@@ -69,8 +69,8 @@ pub fn join(previous: Option<char>, before_previous: Option<char>, text: &str) -
     text.to_owned()
 }
 
-/// What LocalFlow knows about the character in front of the cursor, which is
-/// only ever what LocalFlow itself put there.
+/// What PrivacyFlow knows about the character in front of the cursor, which is
+/// only ever what PrivacyFlow itself put there.
 ///
 /// macOS can be asked what surrounds the cursor, but many applications answer
 /// nothing and the question costs an accessibility round trip. This knows the
@@ -82,7 +82,7 @@ pub struct CursorMemory {
     placed: Option<Placed>,
 }
 
-/// The tail of the last dictation LocalFlow placed, and where it placed it.
+/// The tail of the last dictation PrivacyFlow placed, and where it placed it.
 #[derive(Debug, Clone, Copy)]
 struct Placed {
     pid: i32,
@@ -103,7 +103,7 @@ impl CursorMemory {
     }
 
     /// Give up the memory, because something that could have moved the cursor
-    /// happened. Forgetting is not a failure: it returns LocalFlow to
+    /// happened. Forgetting is not a failure: it returns PrivacyFlow to
     /// inserting text exactly as it arrives, which is what it always did.
     pub fn forget(&mut self) {
         self.placed = None;
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_path_separator_wedged_against_a_word_does_not_gain_a_space() {
-        assert_eq!(join(Some('/'), Some('c'), "localflow"), "localflow");
+        assert_eq!(join(Some('/'), Some('c'), "privacyflow"), "privacyflow");
     }
 
     #[test]

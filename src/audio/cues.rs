@@ -73,7 +73,7 @@ impl Cues {
         let callback_requested = requested.clone();
         let mut playing: Option<(Arc<[f32]>, usize)> = None;
         let config: cpal::StreamConfig = supported.clone().into();
-        let err_fn = |error| eprintln!("LocalFlow cue stream error: {error}");
+        let err_fn = |error| eprintln!("PrivacyFlow cue stream error: {error}");
 
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(

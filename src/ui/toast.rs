@@ -1,4 +1,4 @@
-//! The toast: what LocalFlow says when a dictation ends up on the clipboard
+//! The toast: what PrivacyFlow says when a dictation ends up on the clipboard
 //! instead of at the cursor.
 //!
 //! Every outcome it reports is already on the capsule, for 1.4 seconds, as a
@@ -52,7 +52,7 @@ const FADE_OUT: f32 = 0.22;
 /// Where the toast window goes, as a top left corner.
 ///
 /// Placed from the capsule rather than from a corner of the screen, because
-/// the capsule is where the user has already chosen to have LocalFlow speak
+/// the capsule is where the user has already chosen to have PrivacyFlow speak
 /// to them. Measured against the full capsule at every capsule size, so the
 /// gap is honest when the capsule is a bead and the toast never lands on top
 /// of it mid-animation.
@@ -147,7 +147,7 @@ pub fn show(ctx: &egui::Context, toast: &Toast, capsule: Centre, areas: &[WorkAr
         .with_active(false)
         .with_mouse_passthrough(true)
         .with_taskbar(false)
-        .with_title("LocalFlow notice");
+        .with_title("PrivacyFlow notice");
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("toast"),
         builder,

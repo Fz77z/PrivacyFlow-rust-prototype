@@ -11,4 +11,4 @@ pub use macos::*;
 pub use nonactivating::{make_capsule_non_activating, remove_capsule_system_shadow};
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("LocalFlow MVP currently supports macOS only.");
+compile_error!("PrivacyFlow MVP currently supports macOS only.");

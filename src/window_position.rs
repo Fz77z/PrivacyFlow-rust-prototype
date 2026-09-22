@@ -89,7 +89,7 @@ fn path(data_dir: &Path) -> PathBuf {
 ///
 /// This matters more here than it would in an ordinary application. The
 /// capsule is borderless, so AppKit's `constrainFrameRect:toScreen:` does not
-/// rescue it: that only applies to titled windows. LocalFlow also sets
+/// rescue it: that only applies to titled windows. PrivacyFlow also sets
 /// `LSUIElement`, so there is no Dock icon and no menu bar item, and the
 /// console can only be opened from the capsule. A capsule restored off screen
 /// is therefore an application that cannot be seen, quit, or moved, and the
@@ -111,7 +111,7 @@ pub fn load(data_dir: &Path) -> Option<Centre> {
     }
     if !is_reachable(centre, &crate::platform::work_areas()) {
         eprintln!(
-            "LocalFlow ignored the capsule's remembered position ({}, {}): it is not on any \
+            "PrivacyFlow ignored the capsule's remembered position ({}, {}): it is not on any \
              display that is connected now.",
             centre.x, centre.y
         );
@@ -183,7 +183,7 @@ pub fn save(data_dir: &Path, centre: Centre) {
         return;
     };
     if let Err(error) = std::fs::write(path(data_dir), text) {
-        eprintln!("LocalFlow could not remember the capsule's position: {error}");
+        eprintln!("PrivacyFlow could not remember the capsule's position: {error}");
     }
 }
 

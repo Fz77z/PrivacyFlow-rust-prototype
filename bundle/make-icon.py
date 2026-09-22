@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render LocalFlow's app icon: the capsule, given thickness and tilted.
+"""Render PrivacyFlow's app icon: the capsule, given thickness and tilted.
 
 The icon is the widget itself as an object. The capsule is the thing on
 screen all day, so the icon is that shape with depth, floating over its own
