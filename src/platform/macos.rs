@@ -11,7 +11,7 @@ use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use objc2_foundation::MainThreadMarker;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -170,43 +170,50 @@ pub enum HotkeyEvent {
     PointerCrossed,
 }
 
-/// The part of the screen where the pointer counts as reaching for the
-/// capsule, shared between the event tap, which sees every movement, and the
-/// UI, which decides where the zone is.
+/// The parts of the screen where the pointer's position matters to the
+/// capsule, such as the capsule itself and the area around it, shared between
+/// the event tap, which sees every movement, and the UI, which decides where
+/// the zones are.
 ///
 /// This is what lets the capsule's window pass clicks through. A window that
 /// ignores the mouse also stops hearing it move, so it can no longer notice
 /// someone approaching; the tap hears every movement regardless, and wakes
-/// the UI only when the pointer crosses the zone's edge, not on every move.
+/// the UI only when the pointer crosses a zone's edge, not on every move.
 #[derive(Clone, Default)]
 pub struct PointerZone(Arc<ZoneState>);
 
 #[derive(Default)]
 struct ZoneState {
-    /// Left, top, right and bottom, in window-space points. None while there
-    /// is nothing to watch, which is whenever minimal mode is off.
-    bounds: Mutex<Option<[f64; 4]>>,
-    inside: AtomicBool,
+    /// Each zone's left, top, right and bottom, in window-space points. Empty
+    /// while there is nothing to watch, which is whenever minimal mode is off.
+    zones: Mutex<Vec<[f64; 4]>>,
+    /// Which zones the pointer was last inside, one bit per zone, so there
+    /// can be at most eight of them.
+    inside: AtomicU8,
 }
 
 impl PointerZone {
-    /// Sets where the zone is, or stops watching with None.
-    pub fn watch(&self, bounds: Option<[f64; 4]>) {
-        if let Ok(mut current) = self.0.bounds.lock() {
-            *current = bounds;
+    /// Sets where the zones are, or stops watching with an empty slice.
+    pub fn watch(&self, zones: &[[f64; 4]]) {
+        debug_assert!(zones.len() <= 8, "one bit per zone, so at most eight");
+        if let Ok(mut current) = self.0.zones.lock() {
+            current.clear();
+            current.extend_from_slice(zones);
         }
     }
 
     /// Records the pointer at `x`, `y` and says whether that took it across
-    /// the zone's edge. Never waits: the event tap calls this, and a tap that
+    /// any zone's edge. Never waits: the event tap calls this, and a tap that
     /// blocks is disabled by macOS. A reading lost to a busy lock is harmless,
     /// because the next movement is a fresh reading of the same question.
     fn crossed(&self, x: f64, y: f64) -> bool {
-        let Ok(bounds) = self.0.bounds.try_lock() else {
+        let Ok(zones) = self.0.zones.try_lock() else {
             return false;
         };
-        let inside = bounds.is_some_and(|[left, top, right, bottom]| {
-            x >= left && x <= right && y >= top && y <= bottom
+        let inside = zones.iter().enumerate().fold(0u8, |inside, (index, zone)| {
+            let [left, top, right, bottom] = *zone;
+            let contains = x >= left && x <= right && y >= top && y <= bottom;
+            if contains { inside | (1 << index) } else { inside }
         });
         self.0.inside.swap(inside, Ordering::Relaxed) != inside
     }
@@ -560,18 +567,24 @@ mod tests {
 
     /// The tap sees every movement of the pointer anywhere on screen, and
     /// each report wakes the UI, so it must speak only when the pointer
-    /// crosses the zone's edge. A zone that reported every move would repaint
-    /// the capsule the whole time the user used their mouse.
+    /// crosses a zone's edge. A zone that reported every move would repaint
+    /// the capsule the whole time the user used their mouse. The zones nest,
+    /// the capsule inside the area around it, and crossing either counts.
     #[test]
     fn the_pointer_zone_reports_crossings_not_movements() {
         let zone = PointerZone::default();
-        zone.watch(Some([100.0, 100.0, 200.0, 150.0]));
-        assert!(!zone.crossed(50.0, 50.0), "outside to outside is not a crossing");
-        assert!(zone.crossed(150.0, 120.0), "entering is");
-        assert!(!zone.crossed(160.0, 125.0), "moving about inside is not");
-        assert!(zone.crossed(250.0, 120.0), "leaving is");
-        zone.watch(None);
-        assert!(!zone.crossed(150.0, 120.0), "a zone that is not watched has no inside");
+        let capsule = [100.0, 100.0, 200.0, 150.0];
+        let around = [0.0, 0.0, 400.0, 300.0];
+        zone.watch(&[capsule, around]);
+        assert!(!zone.crossed(500.0, 500.0), "outside to outside is not a crossing");
+        assert!(zone.crossed(50.0, 50.0), "coming near is");
+        assert!(!zone.crossed(60.0, 55.0), "moving about nearby is not");
+        assert!(zone.crossed(150.0, 120.0), "reaching the capsule is");
+        assert!(!zone.crossed(160.0, 125.0), "moving about on it is not");
+        assert!(zone.crossed(50.0, 50.0), "backing off to nearby is");
+        assert!(zone.crossed(500.0, 500.0), "leaving altogether is");
+        zone.watch(&[]);
+        assert!(!zone.crossed(150.0, 120.0), "zones that are not watched have no inside");
     }
 
     #[test]

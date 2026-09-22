@@ -12,12 +12,23 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver as HotkeyReceiver;
 use std::time::{Duration, Instant};
 
-/// How long the capsule takes to fade in and out in minimal mode. Quick to
-/// appear, because it appears in answer to the user pressing the key, and
-/// slower to go, so it leaves rather than vanishes. Opacity has no momentum
-/// worth modelling, so these are plain fades rather than springs.
+/// How long the capsule takes to fade in minimal mode. Quick to appear when
+/// the user presses the key, because it is answering them, and gentle for
+/// everything else: fading away, and the hint fading in and out as the
+/// pointer comes and goes. Opacity has no momentum worth modelling, so these
+/// are plain fades rather than springs.
 const APPEAR_SECONDS: f32 = 0.1;
-const DISAPPEAR_SECONDS: f32 = 0.3;
+const GENTLE_FADE_SECONDS: f32 = 0.3;
+
+/// The part of the screen around the capsule's spot where the hidden capsule
+/// shows a faint hint of itself, so the user can see where it lives when
+/// they are working nearby. Generous on purpose: it answers "where is it?",
+/// which is asked from somewhere in its neighbourhood, not from on top of it.
+const NEARBY_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 320.0);
+
+/// How solid the hint is. Visible enough to spot, faint enough to read as a
+/// hint rather than as the capsule, and it never takes clicks.
+const HINT_PRESENCE: f32 = 0.45;
 
 /// How long the pointer has to rest where the hidden capsule lives before it
 /// appears. Without a pause, every pointer passing across that spot on its
@@ -628,18 +639,22 @@ impl LocalFlowApp {
         let reach = ctx
             .input(|i| i.viewport().outer_rect)
             .map(|window| egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE));
-        self.pointer_zone.watch(reach.filter(|_| minimal).map(|reach| {
-            [
-                reach.left() as f64,
-                reach.top() as f64,
-                reach.right() as f64,
-                reach.bottom() as f64,
-            ]
-        }));
-        let reaching = reach.is_some_and(|reach| {
-            let (x, y) = crate::platform::pointer_in_window_space();
-            reach.contains(egui::pos2(x as f32, y as f32))
-        });
+        let nearby = ctx
+            .input(|i| i.viewport().outer_rect)
+            .map(|window| egui::Rect::from_center_size(window.center(), NEARBY_SIZE));
+        let bounds = |rect: egui::Rect| {
+            [rect.left() as f64, rect.top() as f64, rect.right() as f64, rect.bottom() as f64]
+        };
+        let zones: Vec<[f64; 4]> = if minimal {
+            [reach, nearby].into_iter().flatten().map(bounds).collect()
+        } else {
+            Vec::new()
+        };
+        self.pointer_zone.watch(&zones);
+        let (x, y) = crate::platform::pointer_in_window_space();
+        let pointer = egui::pos2(x as f32, y as f32);
+        let reaching = reach.is_some_and(|reach| reach.contains(pointer));
+        let near = nearby.is_some_and(|nearby| nearby.contains(pointer));
         // A context menu can hang outside the reach, and the capsule must not
         // shrink or let clicks fall through it while the user is choosing.
         self.reaching_since = if reaching {
@@ -705,14 +720,20 @@ impl LocalFlowApp {
         if width_moving || height_moving {
             ctx.request_repaint();
         }
-        // Hidden whenever nothing is happening. An unread failure does not
-        // keep it on screen: the menu bar icon turns red for that instead.
+        // Hidden whenever nothing is happening, except for a faint hint while
+        // the pointer is in the area. An unread failure does not keep it on
+        // screen: the menu bar icon turns red for that instead.
         let resting =
             size == ui::capsule::CapsuleSize::Bead && self.state.hud == HudState::Idle;
+        let presence = match (resting, near) {
+            (false, _) => 1.0,
+            (true, true) => HINT_PRESENCE,
+            (true, false) => 0.0,
+        };
         let presence = ctx.animate_value_with_time(
             egui::Id::new("capsule_presence"),
-            if resting { 0.0 } else { 1.0 },
-            if resting { DISAPPEAR_SECONDS } else { APPEAR_SECONDS },
+            presence,
+            if resting { GENTLE_FADE_SECONDS } else { APPEAR_SECONDS },
         );
         (
             egui::vec2(self.capsule_width.value(), self.capsule_height.value()),
