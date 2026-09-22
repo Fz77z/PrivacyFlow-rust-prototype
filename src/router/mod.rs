@@ -149,6 +149,46 @@ impl KevWorker {
         Ok(worker)
     }
 
+    /// Ask the worker to make the router's weights resident while the user is
+    /// still speaking.
+    ///
+    /// Under memory pressure macOS compresses Kev's idle weights within
+    /// seconds, and decompressing them used to cost the first route after a
+    /// pause roughly 450ms. Paying that during speech takes it off the wait
+    /// after release. A dictation released before this finishes waits for the
+    /// remainder, which is work its own route would otherwise have done.
+    /// See docs/investigations/2026-09-22-router-latency-and-benchmark-protocol.md.
+    ///
+    /// A reply that is not the acknowledgement means the request and reply
+    /// streams no longer line up, and every later dictation would receive
+    /// the wrong answer, so that poisons the worker. A warm-up the worker
+    /// reports as failed leaves it healthy and is returned as an error.
+    pub fn prepare(&mut self) -> Result<()> {
+        #[derive(Serialize)]
+        struct Request {
+            prepare: bool,
+        }
+
+        if let Some(reason) = &self.fatal {
+            return Err(anyhow!("{reason}. Quit and reopen LocalFlow."));
+        }
+        if let Err(error) = self.write_request(&Request { prepare: true }) {
+            return Err(self.poison(format!(
+                "The inference worker stopped accepting requests: {error}"
+            )));
+        }
+        let line = self.read_response(INFERENCE_BASE_TIMEOUT, "while preparing the router")?;
+        match parse_prepared(&line) {
+            Ok(Prepared::Ready) => Ok(()),
+            Ok(Prepared::Failed(message)) => {
+                Err(anyhow!("The worker could not prepare the router: {message}"))
+            }
+            Err(error) => Err(self.poison(format!(
+                "The inference worker answered a warm-up with something else ({error:#})"
+            ))),
+        }
+    }
+
     /// `audio_duration` sizes this request's wedge timeout; it is not used for
     /// anything the worker decides.
     pub fn transcribe_and_route(
@@ -227,6 +267,37 @@ struct Response {
     unintelligible: Option<bool>,
     audio_seconds: Option<f64>,
     avg_logprob: Option<f64>,
+}
+
+/// What the worker said about a warm-up request.
+#[derive(Debug, PartialEq)]
+enum Prepared {
+    Ready,
+    /// The worker is healthy but the warm-up itself raised.
+    Failed(String),
+}
+
+/// Read the reply to a warm-up request, refusing anything else.
+///
+/// Kept apart from the transport for the same reason as `parse_response`:
+/// this is the part that decides whether the protocol is still in step.
+fn parse_prepared(line: &str) -> Result<Prepared> {
+    #[derive(Deserialize)]
+    struct Reply {
+        prepared: Option<bool>,
+        error: Option<String>,
+    }
+    let reply: Reply =
+        serde_json::from_str(line).context("Inference worker sent invalid JSON")?;
+    if let Some(error) = reply.error {
+        return Ok(Prepared::Failed(error));
+    }
+    if reply.prepared == Some(true) {
+        return Ok(Prepared::Ready);
+    }
+    // The line itself is left out: out of step, it may be a dictation's reply,
+    // and that carries what the user said.
+    Err(anyhow!("expected a warm-up acknowledgement"))
 }
 
 /// Turn one worker reply into the result the pipeline inserts.
@@ -432,6 +503,53 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(after.contains("Quit and reopen LocalFlow"), "{after}");
+    }
+
+    /// The acknowledgement is consumed, so the next reply the pipeline reads
+    /// belongs to the next request.
+    #[test]
+    fn a_warm_up_consumes_exactly_its_own_acknowledgement() {
+        let (mut worker, response_tx) = silent_worker();
+        response_tx
+            .send(r#"{"prepared": true, "prepare_ms": 71.3}"#.to_owned())
+            .unwrap();
+        response_tx.send(PASS_THROUGH_REPLY.to_owned()).unwrap();
+
+        worker.prepare().unwrap();
+        let next = worker
+            .read_response(Duration::from_millis(50), "while transcribing")
+            .unwrap();
+        assert_eq!(next, PASS_THROUGH_REPLY);
+        assert!(worker.fatal.is_none());
+    }
+
+    /// A warm-up answered with anything else means requests and replies are
+    /// out of step, and every later dictation would get the wrong answer. That
+    /// must stop the worker, and must not repeat the stray reply, which can
+    /// carry what the user said.
+    #[test]
+    fn a_warm_up_answered_out_of_step_poisons_the_worker() {
+        let (mut worker, response_tx) = silent_worker();
+        response_tx.send(PASS_THROUGH_REPLY.to_owned()).unwrap();
+
+        let error = worker.prepare().unwrap_err().to_string();
+        assert!(error.contains("Quit and reopen LocalFlow"), "{error}");
+        assert!(!error.contains("written using the dictation"), "{error}");
+        assert!(worker.fatal.is_some());
+    }
+
+    /// A warm-up the worker reports as failed leaves the worker usable: the
+    /// dictation behind it still runs and reports its own outcome.
+    #[test]
+    fn a_failed_warm_up_does_not_poison_the_worker() {
+        let (mut worker, response_tx) = silent_worker();
+        response_tx
+            .send(r#"{"error": "MPS backend out of memory"}"#.to_owned())
+            .unwrap();
+
+        let error = worker.prepare().unwrap_err().to_string();
+        assert!(error.contains("MPS backend out of memory"), "{error}");
+        assert!(worker.fatal.is_none());
     }
 
     // Captured verbatim from the real worker, so a change to its reply shape

@@ -107,6 +107,17 @@ fn destination(target_pid: Option<i32>, capture_end: CaptureEnd) -> Destination 
     }
 }
 
+/// What the pipeline thread is asked to do, in the order it was asked.
+///
+/// One channel for both, so a warm-up can never overtake the dictation it was
+/// sent ahead of.
+enum Work {
+    /// The user has started speaking. Make the router resident before the
+    /// dictation needs it.
+    Prepare,
+    Dictation(WorkItem),
+}
+
 struct WorkItem {
     captured: CapturedAudio,
     capture_end: CaptureEnd,
@@ -114,6 +125,7 @@ struct WorkItem {
     queued_at: Instant,
     target_pid: Option<i32>,
 }
+
 /// What became of one utterance. It either reached the cursor, in one of the
 /// two ways a dictation can land, or it was lost at a named stage. It is never
 /// both, so the two answers share one field rather than sitting side by side
@@ -167,7 +179,7 @@ pub struct LocalFlowApp {
     microphone: Option<Microphone>,
     hotkey_events: HotkeyReceiver<HotkeyEvent>,
     _hotkey: GlobalHotkey,
-    work_tx: Sender<WorkItem>,
+    work_tx: Sender<Work>,
     result_rx: Receiver<PipelineMessage>,
     recording_started: Option<Instant>,
     /// Whether this press has already been called quiet, so the warning is
@@ -345,6 +357,13 @@ impl LocalFlowApp {
         self.target_pid = target_pid;
         self.recording_started = Some(Instant::now());
         self.warned_quiet = false;
+        // Only once the worker is up. While it is still loading, its models
+        // were just touched and are resident anyway, and a warm-up would only
+        // queue in front of the dictation. A closed channel is not reported
+        // here: the dictation's own send meets it and says so.
+        if self.state.worker == WorkerStatus::Ready {
+            let _ = self.work_tx.send(Work::Prepare);
+        }
     }
 
     fn finish_recording(&mut self, ending: CaptureEnd) {
@@ -403,13 +422,13 @@ impl LocalFlowApp {
                 };
                 if self
                     .work_tx
-                    .send(WorkItem {
+                    .send(Work::Dictation(WorkItem {
                         captured,
                         capture_end,
                         speech_finished,
                         queued_at: Instant::now(),
                         target_pid: self.target_pid.take(),
-                    })
+                    }))
                     .is_err()
                 {
                     self.fail_locally("finish_recording", Failure::dropped(
@@ -734,7 +753,7 @@ impl eframe::App for LocalFlowApp {
 /// every message. Without that, a finished dictation sits unread in the
 /// channel and the next hotkey press is swallowed by a stale Processing state.
 fn start_pipeline_worker(
-    work_rx: Receiver<WorkItem>,
+    work_rx: Receiver<Work>,
     result_tx: Sender<PipelineMessage>,
     audio_dir: PathBuf,
     repaint: egui::Context,
@@ -763,7 +782,14 @@ fn start_pipeline_worker(
             // thread that inserts text, and it handles one dictation at a
             // time, so the memory needs no lock to stay consistent.
             let mut cursor = CursorMemory::default();
-            for item in work_rx {
+            for work in work_rx {
+                let item = match work {
+                    Work::Prepare => {
+                        prepare(&mut worker);
+                        continue;
+                    }
+                    Work::Dictation(item) => item,
+                };
                 let message = process(&mut worker, &audio_dir, item, &mut cursor, &cursor_moved);
                 // Traced before the send only in the sense of being prepared
                 // here; the UI is told first, because a diagnostic must never
@@ -830,6 +856,21 @@ fn sweep_audio_cache(dir: &Path) {
                 path.display()
             );
         }
+    }
+}
+
+/// Warm the router ahead of a dictation.
+///
+/// A failure here costs the dictation behind it speed and nothing else, so it
+/// is reported on stderr rather than to the user. The dictation still runs and
+/// reports its own outcome, and a worker the warm-up found broken has already
+/// been poisoned, so that dictation fails with the reason.
+fn prepare(worker: &mut Result<KevWorker, String>) {
+    let Ok(worker) = worker else {
+        return;
+    };
+    if let Err(error) = worker.prepare() {
+        eprintln!("LocalFlow could not prepare the router for this dictation: {error:#}");
     }
 }
 
