@@ -189,6 +189,7 @@ impl Microphone {
             samples: self.samples.clone(),
             sample_rate: self.sample_rate,
             truncated: self.overflowed.load(Ordering::Relaxed),
+            device_name: self.device_name.clone(),
         })
     }
 
@@ -333,9 +334,18 @@ pub struct CapturedAudio {
     /// The buffer filled before the user stopped speaking, so the end of the
     /// dictation was never captured. What is here is the beginning of it.
     pub truncated: bool,
+    /// Carried on the capture rather than read from the microphone later,
+    /// because the trace is written on the pipeline thread, which has the
+    /// capture but not the device that produced it.
+    device_name: String,
 }
 
 impl CapturedAudio {
+    /// Which microphone these samples came from.
+    pub fn device_name(&self) -> &str {
+        &self.device_name
+    }
+
     /// Measure the capture without consuming it.
     ///
     /// Taken on the UI thread the instant the hotkey comes up, because a
@@ -551,6 +561,7 @@ mod tests {
             samples: Arc::new(Mutex::new(consumer)),
             sample_rate: 16_000,
             truncated: false,
+            device_name: "test microphone".to_owned(),
         };
 
         let finished = captured.finish(&dir).unwrap();
@@ -567,6 +578,7 @@ mod tests {
             samples: Arc::new(Mutex::new(consumer)),
             sample_rate: rate,
             truncated: false,
+            device_name: "test microphone".to_owned(),
         }
     }
 

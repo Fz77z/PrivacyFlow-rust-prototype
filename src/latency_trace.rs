@@ -115,9 +115,16 @@ struct Silence {
     /// The loudest window, recorded beside the mean that decided. It is here
     /// to be compared against, not acted on.
     peak_rms: f32,
+    /// Which microphone this came from.
+    ///
+    /// The floor is one absolute level, but the level reaching it is not:
+    /// it moves with the device and with how far away the user is sitting.
+    /// Without this, a session that drifted quiet and a press that held no
+    /// speech leave identical records.
+    device: String,
 }
 
-fn silence(seconds: f64, rms: f32, peak: f32) -> Silence {
+fn silence(seconds: f64, rms: f32, peak: f32, device: &str) -> Silence {
     Silence {
         captured_at: chrono::Utc::now().to_rfc3339(),
         outcome: "no_speech",
@@ -125,19 +132,20 @@ fn silence(seconds: f64, rms: f32, peak: f32) -> Silence {
         audio_seconds: (seconds * 1000.0).round() / 1000.0,
         rms,
         peak_rms: peak,
+        device: device.to_owned(),
     }
 }
 
 /// Append a refused capture, if there is somewhere to put it.
-pub fn record_silence(seconds: f64, rms: f32, peak: f32) {
-    append(&silence(seconds, rms, peak));
+pub fn record_silence(seconds: f64, rms: f32, peak: f32, device: &str) {
+    append(&silence(seconds, rms, peak, device));
 }
 
 /// Append a capture the floor let through.
 ///
 /// The counterpart of the refusals. A floor can only be judged against both
 /// sides of it: what it turned away says nothing about what it should have.
-pub fn record_capture(seconds: f64, rms: f32, peak: f32) {
+pub fn record_capture(seconds: f64, rms: f32, peak: f32, device: &str) {
     append(&Silence {
         captured_at: chrono::Utc::now().to_rfc3339(),
         outcome: "captured",
@@ -145,6 +153,7 @@ pub fn record_capture(seconds: f64, rms: f32, peak: f32) {
         audio_seconds: (seconds * 1000.0).round() / 1000.0,
         rms,
         peak_rms: peak,
+        device: device.to_owned(),
     });
 }
 
@@ -176,6 +185,32 @@ fn append(record: &impl serde::Serialize) {
 mod tests {
     use super::*;
     use crate::state::Failure;
+
+    /// Which microphone a capture came from, because the floor that judges it
+    /// is an absolute level and the level depends on the device and on how far
+    /// the user is sitting from it. Refusals and accepted captures were
+    /// indistinguishable on this point, which is what made a drifting input
+    /// level impossible to tell apart from quiet speech.
+    #[test]
+    fn a_refused_capture_names_the_microphone_it_came_from() {
+        let record =
+            serde_json::to_value(silence(1.0, 0.001, 0.002, "MacBook Pro Microphone")).unwrap();
+        let keys: Vec<_> = record.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "audio_seconds",
+                "captured_at",
+                "device",
+                "failing_stage",
+                "outcome",
+                "peak_rms",
+                "rms"
+            ],
+            "a new field here is a new way for dictated text to reach the disk"
+        );
+        assert_eq!(record["device"], "MacBook Pro Microphone");
+    }
 
     /// The trace is written to disk and kept. Dictated text is transient by
     /// policy, so a failure record must carry what went wrong and nothing the

@@ -363,7 +363,12 @@ impl LocalFlowApp {
                 // that are already in memory.
                 match captured.inspect() {
                     Ok(crate::audio::Verdict::TooQuiet { seconds, rms, peak }) => {
-                        crate::latency_trace::record_silence(seconds, rms, peak);
+                        crate::latency_trace::record_silence(
+                            seconds,
+                            rms,
+                            peak,
+                            captured.device_name(),
+                        );
                         // Thrown away where it lies, or its samples would be
                         // prepended to whatever is said next.
                         if let Err(error) = captured.discard() {
@@ -826,13 +831,14 @@ fn process(
     let target_pid = item.target_pid;
     let capture_end = item.capture_end;
     let finalize_started = Instant::now();
+    let device_name = item.captured.device_name().to_owned();
     let audio = match item.captured.finish(audio_dir) {
         Ok(crate::audio::Finished::Recorded(audio)) => audio,
         // Nothing was said, and nothing was written: the capture answered for
         // itself before the worker was involved. Recorded as metadata so the
         // floor can be reviewed against real presses, never as a dictation.
         Ok(crate::audio::Finished::TooQuiet { seconds, rms, peak }) => {
-            crate::latency_trace::record_silence(seconds, rms, peak);
+            crate::latency_trace::record_silence(seconds, rms, peak, &device_name);
             return PipelineMessage::NoSpeech;
         }
         Err(error) => {
@@ -849,7 +855,12 @@ fn process(
         }
     };
     timings.capture_finalize_ms = Some(finalize_started.elapsed().as_millis());
-    crate::latency_trace::record_capture(audio.duration.as_secs_f64(), audio.rms, audio.peak);
+    crate::latency_trace::record_capture(
+        audio.duration.as_secs_f64(),
+        audio.rms,
+        audio.peak,
+        &device_name,
+    );
     timings.audio_ms = Some(audio.duration.as_millis());
     let trace_id = audio
         .path
