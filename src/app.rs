@@ -21,6 +21,10 @@ const BUTTON_MARGIN: f32 = 6.0;
 /// registers, and rare enough to cost nothing.
 const CURSOR_RECLAIM: Duration = Duration::from_millis(100);
 
+/// How long the result keeps the capsule open before it folds back into the
+/// cog: long enough to see the success pop or the failure shake play out.
+const RESULT_HOLD: Duration = Duration::from_millis(600);
+
 /// How long "Show Capsule" in the menu bar keeps the capsule open. Long
 /// enough to find it on screen and reach it; once the pointer is on it, the
 /// capsule stays for as long as the pointer does.
@@ -688,12 +692,16 @@ impl PrivacyFlowApp {
             crate::platform::show_arrow_cursor();
             ctx.request_repaint_after(CURSOR_RECLAIM);
         }
-        // Only the recording itself grows the capsule. Once the key is let go
-        // the cog is enough to carry transcribing and the result, and the hud
-        // is not a substitute for this: it stays Listening for a moment after
-        // release, until transcription is worth announcing.
-        let recording = self.recording_started.is_some();
-        let size = ui::capsule::size_for(minimal, pointing, recording);
+        // A dictation holds the capsule open from the key going down, through
+        // transcribing, until its result has had a moment on screen. The cog
+        // alone has no bars, so folding back into it at release would hide
+        // the transcribing wave the user is waiting on. Held by the result's
+        // own clock, so a failure raised before any dictation began, which
+        // has no clock, never holds the capsule open.
+        let dictating = self.recording_started.is_some()
+            || matches!(self.state.hud, HudState::Listening | HudState::Processing)
+            || self.state.done_at.is_some_and(|at| at.elapsed() < RESULT_HOLD);
+        let size = ui::capsule::size_for(minimal, pointing, dictating);
         // Sprung rather than tweened, so growing pops open and a change of
         // mind part way turns around smoothly. The feel is chosen from the
         // width, and both axes share it so they stay in step.

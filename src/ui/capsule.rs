@@ -40,17 +40,16 @@ impl CapsuleSize {
 /// expressed as a signature: the application never changes the capsule's
 /// shape on its own, and there is no argument here through which it could.
 ///
-/// `recording` is "the microphone is capturing right now". Transcribing and
-/// the result that follows are shown at bead size, in the bars' colour, so
-/// the capsule shrinks back the moment the user lets go.
-pub fn size_for(minimal: bool, pointing: bool, recording: bool) -> CapsuleSize {
+/// `dictating` is "a dictation is under way": from the key going down until
+/// its result has been shown.
+pub fn size_for(minimal: bool, pointing: bool, dictating: bool) -> CapsuleSize {
     if !minimal {
         return CapsuleSize::Full;
     }
     if pointing {
         return CapsuleSize::Full;
     }
-    if recording {
+    if dictating {
         return CapsuleSize::Active;
     }
     CapsuleSize::Bead
@@ -554,8 +553,8 @@ mod tests {
     #[test]
     fn with_minimal_mode_off_the_capsule_is_always_full_size() {
         for pointing in [false, true] {
-            for recording in [false, true] {
-                assert_eq!(size_for(false, pointing, recording), CapsuleSize::Full);
+            for dictating in [false, true] {
+                assert_eq!(size_for(false, pointing, dictating), CapsuleSize::Full);
             }
         }
     }
