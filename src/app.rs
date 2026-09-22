@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 /// small target opens without having to be hit exactly.
 const BUTTON_MARGIN: f32 = 6.0;
 
+/// How often the capsule reclaims the cursor while the pointer is on it.
+/// Often enough that a cursor the app underneath sets is gone before it
+/// registers, and rare enough to cost nothing.
+const CURSOR_RECLAIM: Duration = Duration::from_millis(100);
+
 /// How long "Show Capsule" in the menu bar keeps the capsule open. Long
 /// enough to find it on screen and reach it; once the pointer is on it, the
 /// capsule stays for as long as the pointer does.
@@ -668,12 +673,20 @@ impl PrivacyFlowApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(pass_clicks_through));
             self.passing_clicks_through = pass_clicks_through;
         }
-        // Claimed every frame the pointer is over the capsule, since the app
+        // Claimed while the pointer is over the capsule, since the app
         // underneath set the cursor last and nothing else will set it back.
         // Not while clicks pass through, because then the capsule is not
         // what the pointer is over.
+        //
+        // Claimed again on a timer, not only when the pointer moves. The
+        // movement that brings the pointer onto the cog can still reach the
+        // app underneath, because the window was letting clicks through when
+        // it happened, and that app then sets its own cursor just after this
+        // one. With the pointer held still, nothing else would wake the
+        // capsule to take it back, and a text cursor stayed over the cog.
         if reaching && !pass_clicks_through {
             crate::platform::show_arrow_cursor();
+            ctx.request_repaint_after(CURSOR_RECLAIM);
         }
         // Only the recording itself grows the capsule. Once the key is let go
         // the cog is enough to carry transcribing and the result, and the hud
