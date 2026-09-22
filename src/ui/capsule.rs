@@ -1,7 +1,7 @@
 use crate::state::{AppState, Failure, HudState};
 use crate::ui::mark::{self, Appearance};
 use crate::ui::theme;
-use egui::{Align2, Color32, Pos2, Rect, Rounding, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, Rounding, Sense, Stroke, Ui, Vec2};
 
 pub enum CapsuleAction {
     ToggleConsole,
@@ -296,42 +296,26 @@ fn paint_label_and_icon(
     let failure = failure_for(state);
     let fade = |color: Color32| color.gamma_multiply(appearing);
     let text_left = mark_rect.right() + theme::MARK_GAP;
-    match failure {
-        Some(failure) => painter.text(
-            Pos2::new(text_left, rect.center().y),
-            Align2::LEFT_CENTER,
-            failure.headline,
-            theme::error_font(),
-            fade(theme::ERROR_TEXT),
-        ),
-        None => {
-            let (label, color) = match state.hud {
-                HudState::Idle => ("Ready", theme::MUTED),
-                HudState::Listening => ("Listening", theme::LABEL),
-                HudState::Processing => (state.processing_label(), theme::LABEL),
-                HudState::Done => ("Inserted", theme::LABEL),
-                HudState::Copied => ("Copied", theme::LABEL),
-                // Muted, like Ready: nothing was said, so nothing happened,
-                // and the capsule should not announce it as though it had.
-                HudState::NoSpeech => ("No speech", theme::MUTED),
-                // Not muted, unlike silence: the user spoke and their words
-                // were discarded, which they are entitled to notice.
-                HudState::NotUnderstood => ("Didn't catch that", theme::LABEL),
-                HudState::Error => ("Ready", theme::MUTED),
-            };
-            painter.text(
-                Pos2::new(text_left, rect.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                theme::label_font(),
-                fade(color),
-            )
-        }
-    };
-
     let icon_rect = Rect::from_center_size(
         Pos2::new(rect.right() - theme::PAD_RIGHT - theme::ICON_SIZE / 2.0, rect.center().y),
         Vec2::splat(theme::ICON_SIZE),
+    );
+    let (text, font, color) = match failure {
+        Some(failure) => (failure.headline, theme::error_font(), theme::ERROR_TEXT),
+        None => {
+            let (label, color) = hud_label(state.hud, state.processing_label());
+            (label, theme::label_font(), color)
+        }
+    };
+    // Cut short with an ellipsis rather than allowed to run on. Failure
+    // headlines are written wherever the failure happens, several are wider
+    // than the gap, and a label left to run on is painted straight through
+    // the cog. The whole message is on the cog's tooltip and in the console.
+    let label = fitted_label(ui, text, font, icon_rect.left() - text_left);
+    painter.galley(
+        Pos2::new(text_left, rect.center().y - label.size().y / 2.0),
+        label,
+        fade(color),
     );
     let tint = if failure.is_some() || state.unread_failure {
         theme::ICON_ALERT
@@ -372,6 +356,40 @@ fn paint_label_and_icon(
     icon.context_menu(|ui| menu(ui, action));
 }
 
+
+/// What the capsule says in each healthy state, and how loudly.
+fn hud_label(hud: HudState, processing: &'static str) -> (&'static str, Color32) {
+    match hud {
+        HudState::Idle => ("Ready", theme::MUTED),
+        HudState::Listening => ("Listening", theme::LABEL),
+        HudState::Processing => (processing, theme::LABEL),
+        HudState::Done => ("Inserted", theme::LABEL),
+        HudState::Copied => ("Copied", theme::LABEL),
+        // Muted, like Ready: nothing was said, so nothing happened, and the
+        // capsule should not announce it as though it had.
+        HudState::NoSpeech => ("No speech", theme::MUTED),
+        // Not muted, unlike silence: the user spoke and their words were
+        // discarded, which they are entitled to notice.
+        HudState::NotUnderstood => ("Didn't catch that", theme::LABEL),
+        HudState::Error => ("Ready", theme::MUTED),
+    }
+}
+
+/// Lays `text` out on one line no wider than `room`, ending in an ellipsis if
+/// it has to be cut. The colour is left to the painter, so the fade applies.
+fn fitted_label(ui: &Ui, text: &str, font: egui::FontId, room: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat { font_id: font, color: Color32::PLACEHOLDER, ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: room,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.fonts(|fonts| fonts.layout_job(job))
+}
 
 /// Move the window with the pointer, rather than asking macOS to run a drag.
 ///
@@ -571,29 +589,42 @@ mod tests {
         assert_eq!(mark.size(), theme::MARK_SIZE);
     }
 
-    /// The label lives between the mark and the cog, and narrowing the
-    /// capsule squeezes it from both sides without anything complaining. The
-    /// longest string it has to hold is "Loading models", which the worker
-    /// shows for the ten or so seconds the models take to load, and which is
-    /// therefore invisible in any screenshot of an idle capsule.
-    ///
-    /// The number is a geometric budget, not a measurement: this asserts that
-    /// the gap exists, not that a particular font fits in it. "Loading
-    /// models" is fourteen characters and renders near 91 points at the
-    /// current label font, so 100 leaves a little room; changing the font
-    /// size or the string without re-measuring would slip past this.
+    /// Every label the capsule shows in a healthy state has to fit whole
+    /// between the mark and the cog, measured in the real font. Failure
+    /// headlines are cut short with an ellipsis if they do not, but these are
+    /// the words the user reads on every dictation, and "Didn't catch that"
+    /// clipped to "Didn't catch th…" would be a defect. Measured rather than
+    /// budgeted, so a larger label font or a longer word fails here.
     #[test]
-    fn the_full_capsule_leaves_room_for_its_longest_label() {
+    fn every_healthy_label_fits_the_full_capsule_whole() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        // Fonts only exist once a frame has run.
+        let _ = ctx.run(Default::default(), |_| {});
         let capsule = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::CAPSULE_SIZE);
         let mark = mark_rect_for(capsule);
-        let icon_left =
-            capsule.right() - theme::PAD_RIGHT - theme::ICON_SIZE;
+        let icon_left = capsule.right() - theme::PAD_RIGHT - theme::ICON_SIZE;
         let room = icon_left - (mark.right() + theme::MARK_GAP);
-        assert!(
-            room >= 100.0,
-            "only {room} points for the label, which is not enough for \
-             \"Loading models\" at the label font"
-        );
+        let states = [
+            HudState::Idle,
+            HudState::Listening,
+            HudState::Processing,
+            HudState::Done,
+            HudState::Copied,
+            HudState::NoSpeech,
+            HudState::NotUnderstood,
+        ];
+        for processing in ["Loading models", "Transcribing"] {
+            for hud in states {
+                let (label, _) = hud_label(hud, processing);
+                let width = ctx.fonts(|fonts| {
+                    fonts.layout_no_wrap(label.to_owned(), theme::label_font(), Color32::WHITE)
+                        .size()
+                        .x
+                });
+                assert!(width <= room, "\"{label}\" is {width} wide, with {room} to fit in");
+            }
+        }
     }
 
     /// At rest it is centred, which is what makes the bead look like a bead
