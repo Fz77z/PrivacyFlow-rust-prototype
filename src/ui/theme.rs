@@ -29,18 +29,14 @@ pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 
 /// The window itself, which never changes size.
 ///
-/// Larger than the full capsule on purpose. The window is the only thing
-/// macOS delivers mouse events for, so it is also the area within which the
-/// capsule can notice someone approaching, and the user asked for expansion
-/// on approach rather than on contact. A catchment the size of the expanded
-/// capsule could not do that: the bead is a fraction of the capsule's height,
-/// so vertically "close" and "on" would be very nearly the same thing.
+/// Larger than the full capsule, so the capsule can grow in place with room
+/// for its shadow. Expanding on approach does not depend on it: the event tap
+/// watches the full capsule's footprint on screen, so the capsule notices the
+/// pointer coming whether or not the window is listening to the mouse.
 ///
-/// The cost is that clicks anywhere in here are swallowed, including the ring
-/// this leaves outside the expanded capsule. Most of the area conceals that
-/// cost, because a pointer inside it is exactly what expands the capsule to
-/// fill the middle, but the ring is real and is the first number to revisit
-/// if it proves annoying.
+/// Clicks outside the expanded capsule's footprint are let through to
+/// whatever is underneath, so the ring this leaves around the capsule costs
+/// nothing but the room the capsule and its shadow need to be drawn in.
 pub const CATCHMENT_SIZE: Vec2 = Vec2::new(320.0, 120.0);
 
 /// The window size for a given setting.

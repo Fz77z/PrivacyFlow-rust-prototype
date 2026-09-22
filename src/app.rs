@@ -183,6 +183,12 @@ pub struct LocalFlowApp {
     microphone: Option<Microphone>,
     hotkey_events: HotkeyReceiver<HotkeyEvent>,
     _hotkey: GlobalHotkey,
+    /// Where the event tap watches for the pointer, so the capsule can pass
+    /// clicks through and still notice someone reaching for it.
+    pointer_zone: crate::platform::PointerZone,
+    /// Whether the capsule's window is currently letting clicks through.
+    /// Tracked so the command is sent when it changes rather than every frame.
+    passing_clicks_through: bool,
     work_tx: Sender<Work>,
     result_rx: Receiver<PipelineMessage>,
     recording_started: Option<Instant>,
@@ -324,6 +330,8 @@ impl LocalFlowApp {
             state,
             microphone,
             hotkey_events,
+            pointer_zone: hotkey.pointer_zone(),
+            passing_clicks_through: false,
             _hotkey: hotkey,
             work_tx,
             result_rx,
@@ -549,26 +557,46 @@ impl LocalFlowApp {
     /// the three fixed sizes, and how solid to draw it. The capsule works out
     /// its own layout from the size.
     ///
-    /// The window never changes size, so nothing here touches the viewport.
-    /// The pointer comes from egui rather than from the screen, because the
-    /// window is now the catchment and receives real move events across the
-    /// whole of it, including the parts it does not paint.
+    /// The window never changes size. The only thing this asks of it is
+    /// whether to let clicks through, which it does whenever the pointer is
+    /// not reaching for the capsule. The pointer is therefore read from the
+    /// screen, not from egui: a window letting clicks through hears nothing.
     fn choose_shape(&mut self, ctx: &egui::Context) -> (egui::Vec2, f32) {
         let minimal = self.state.settings.minimal_mode;
-        let window = ctx.screen_rect();
-        // The capsule sits in the middle of the catchment, and this is the
-        // rectangle the user is reaching for. Entering it expands the
-        // capsule. The ring outside it is the lead-in: it is what lets the
-        // window see a pointer coming before it arrives, and it is also the
-        // part that swallows clicks without ever painting anything.
-        let reach = egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE);
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let pointing = match (minimal, pointer) {
-            (false, _) => false,
-            (true, Some(pos)) => reach.contains(pos) || self.dragging,
-            // No pointer at all means it is outside the catchment entirely.
-            (true, None) => self.dragging,
-        };
+        // The rectangle the user is reaching for, on the screen: the full
+        // capsule's footprint around the window's centre. Entering it expands
+        // the capsule. It is measured on the screen rather than inside the
+        // window because the window stops hearing the pointer whenever it is
+        // letting clicks through, and the event tap watching this zone is
+        // what notices the pointer coming back.
+        let reach = ctx
+            .input(|i| i.viewport().outer_rect)
+            .map(|window| egui::Rect::from_center_size(window.center(), ui::theme::CAPSULE_SIZE));
+        self.pointer_zone.watch(reach.filter(|_| minimal).map(|reach| {
+            [
+                reach.left() as f64,
+                reach.top() as f64,
+                reach.right() as f64,
+                reach.bottom() as f64,
+            ]
+        }));
+        let reaching = reach.is_some_and(|reach| {
+            let (x, y) = crate::platform::pointer_in_window_space();
+            reach.contains(egui::pos2(x as f32, y as f32))
+        });
+        // A context menu can hang outside the reach, and the capsule must not
+        // shrink or let clicks fall through it while the user is choosing.
+        let pointing =
+            minimal && (reaching || self.dragging || ctx.is_context_menu_open());
+        // Everywhere outside the reach is empty window, which used to swallow
+        // every click aimed at whatever was underneath. Until the window's
+        // place on screen is known the zone cannot be watched either, so
+        // clicks are only let through once it is.
+        let pass_clicks_through = minimal && reach.is_some() && !pointing;
+        if pass_clicks_through != self.passing_clicks_through {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(pass_clicks_through));
+            self.passing_clicks_through = pass_clicks_through;
+        }
         // Only the recording itself grows the capsule. Once the key is let go
         // the bead is enough to carry transcribing and the result in colour,
         // and the hud is not a substitute for this: it stays Listening for a
@@ -634,6 +662,9 @@ impl eframe::App for LocalFlowApp {
             match event {
                 HotkeyEvent::Pressed => self.start_recording(),
                 HotkeyEvent::Released => self.finish_recording(CaptureEnd::Released),
+                // Nothing to do but be awake: `choose_shape` reads the
+                // pointer itself this frame.
+                HotkeyEvent::PointerCrossed => {}
             }
         }
         self.receive_results();

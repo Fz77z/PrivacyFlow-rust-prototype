@@ -13,7 +13,7 @@ use objc2_foundation::MainThreadMarker;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const V_KEYCODE: u16 = 0x09;
@@ -164,6 +164,52 @@ fn moves_the_cursor(event_type: CGEventType) -> bool {
 pub enum HotkeyEvent {
     Pressed,
     Released,
+    /// The pointer entered or left the capsule's zone. It carries nothing,
+    /// because its only job is to wake the UI, which then reads the pointer
+    /// for itself.
+    PointerCrossed,
+}
+
+/// The part of the screen where the pointer counts as reaching for the
+/// capsule, shared between the event tap, which sees every movement, and the
+/// UI, which decides where the zone is.
+///
+/// This is what lets the capsule's window pass clicks through. A window that
+/// ignores the mouse also stops hearing it move, so it can no longer notice
+/// someone approaching; the tap hears every movement regardless, and wakes
+/// the UI only when the pointer crosses the zone's edge, not on every move.
+#[derive(Clone, Default)]
+pub struct PointerZone(Arc<ZoneState>);
+
+#[derive(Default)]
+struct ZoneState {
+    /// Left, top, right and bottom, in window-space points. None while there
+    /// is nothing to watch, which is whenever minimal mode is off.
+    bounds: Mutex<Option<[f64; 4]>>,
+    inside: AtomicBool,
+}
+
+impl PointerZone {
+    /// Sets where the zone is, or stops watching with None.
+    pub fn watch(&self, bounds: Option<[f64; 4]>) {
+        if let Ok(mut current) = self.0.bounds.lock() {
+            *current = bounds;
+        }
+    }
+
+    /// Records the pointer at `x`, `y` and says whether that took it across
+    /// the zone's edge. Never waits: the event tap calls this, and a tap that
+    /// blocks is disabled by macOS. A reading lost to a busy lock is harmless,
+    /// because the next movement is a fresh reading of the same question.
+    fn crossed(&self, x: f64, y: f64) -> bool {
+        let Ok(bounds) = self.0.bounds.try_lock() else {
+            return false;
+        };
+        let inside = bounds.is_some_and(|[left, top, right, bottom]| {
+            x >= left && x <= right && y >= top && y <= bottom
+        });
+        self.0.inside.swap(inside, Ordering::Relaxed) != inside
+    }
 }
 
 /// A passive native event tap for the fixed MVP push-to-talk key: Right Option.
@@ -176,6 +222,7 @@ pub enum HotkeyEvent {
 #[derive(Default)]
 pub struct GlobalHotkey {
     moved_cursor: CursorMoved,
+    pointer_zone: PointerZone,
 }
 
 /// Whether the user has pressed or clicked anything, shared with whoever needs
@@ -203,6 +250,11 @@ impl GlobalHotkey {
         self.moved_cursor.clone()
     }
 
+    /// A handle onto the zone the tap watches the pointer for.
+    pub fn pointer_zone(&self) -> PointerZone {
+        self.pointer_zone.clone()
+    }
+
     pub fn right_option(
         wake_ui: impl Fn() + Send + 'static,
     ) -> Result<(Self, Receiver<HotkeyEvent>)> {
@@ -213,6 +265,8 @@ impl GlobalHotkey {
         let active = held.clone();
         let moved_cursor = CursorMoved::default();
         let observed_movement = moved_cursor.clone();
+        let pointer_zone = PointerZone::default();
+        let watched_zone = pointer_zone.clone();
 
         // A HID event-tap callback must never wait for egui's repaint lock.
         // Forward events and request a repaint from an ordinary thread instead.
@@ -250,6 +304,8 @@ impl GlobalHotkey {
                         CGEventType::LeftMouseDown,
                         CGEventType::RightMouseDown,
                         CGEventType::OtherMouseDown,
+                        CGEventType::MouseMoved,
+                        CGEventType::LeftMouseDragged,
                     ],
                     move |_proxy, event_type, event| {
                         if matches!(
@@ -263,6 +319,18 @@ impl GlobalHotkey {
                             let port = callback_port.load(Ordering::Acquire);
                             if !port.is_null() {
                                 unsafe { CGEventTapEnable(port, true) };
+                            }
+                            return None;
+                        }
+                        if matches!(
+                            event_type,
+                            CGEventType::MouseMoved | CGEventType::LeftMouseDragged
+                        ) {
+                            // The event's location is in the same top-left,
+                            // y-down points as window positions.
+                            let point = event.location();
+                            if watched_zone.crossed(point.x, point.y) {
+                                let _ = tap_tx.send(HotkeyEvent::PointerCrossed);
                             }
                             return None;
                         }
@@ -315,7 +383,7 @@ impl GlobalHotkey {
             .context("Could not start macOS global hotkey listener")?;
 
         match ready_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(Ok(())) => Ok((Self { moved_cursor }, event_rx)),
+            Ok(Ok(())) => Ok((Self { moved_cursor, pointer_zone }, event_rx)),
             Ok(Err(error)) => Err(anyhow!(error)),
             Err(_) => Err(anyhow!("macOS global event tap did not become ready")),
         }
@@ -479,6 +547,22 @@ pub fn insert_text(text: &str, target_pid: i32) -> Result<Insertion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tap sees every movement of the pointer anywhere on screen, and
+    /// each report wakes the UI, so it must speak only when the pointer
+    /// crosses the zone's edge. A zone that reported every move would repaint
+    /// the capsule the whole time the user used their mouse.
+    #[test]
+    fn the_pointer_zone_reports_crossings_not_movements() {
+        let zone = PointerZone::default();
+        zone.watch(Some([100.0, 100.0, 200.0, 150.0]));
+        assert!(!zone.crossed(50.0, 50.0), "outside to outside is not a crossing");
+        assert!(zone.crossed(150.0, 120.0), "entering is");
+        assert!(!zone.crossed(160.0, 125.0), "moving about inside is not");
+        assert!(zone.crossed(250.0, 120.0), "leaving is");
+        zone.watch(None);
+        assert!(!zone.crossed(150.0, 120.0), "a zone that is not watched has no inside");
+    }
 
     #[test]
     fn typing_and_clicking_put_the_cursor_somewhere_localflow_does_not_know() {
