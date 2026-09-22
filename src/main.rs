@@ -4,6 +4,7 @@ mod insertion;
 mod instance;
 mod latency_trace;
 mod platform;
+mod retention;
 mod router;
 mod settings;
 mod state;

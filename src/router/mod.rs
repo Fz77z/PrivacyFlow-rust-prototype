@@ -40,6 +40,10 @@ pub struct InferenceResult {
     pub output: String,
     /// Set only when a route actually ran a text processor.
     pub processing_ms: Option<u128>,
+    /// Which recognizer produced `transcript`. Carried so a retained corpus
+    /// says what its own baseline was, rather than being ambiguous about it if
+    /// the production model ever changes mid-collection.
+    pub asr_model: String,
 }
 
 /// What one reply from the worker means.
@@ -265,6 +269,7 @@ impl KevWorker {
 struct Response {
     transcript: Option<String>,
     asr_ms: Option<f64>,
+    asr_model: Option<String>,
     route: Option<Route>,
     router_ms: Option<f64>,
     output: Option<String>,
@@ -372,6 +377,9 @@ fn parse_response(line: &str) -> Result<Reply> {
             .router_ms
             .ok_or_else(|| anyhow!("Inference worker omitted router latency"))?
             .round() as u128,
+        asr_model: response
+            .asr_model
+            .ok_or_else(|| anyhow!("Inference worker omitted the ASR model name"))?,
     }))
 }
 

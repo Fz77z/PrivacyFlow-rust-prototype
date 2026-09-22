@@ -28,16 +28,29 @@ pub struct Settings {
     /// follows the system input, which is what macOS switches to a headset
     /// the moment one connects.
     pub preferred_microphone: Option<String>,
+    /// Whether a dictation's recording is kept after it has been transcribed,
+    /// so a different recognizer can be compared against it offline later.
+    ///
+    /// Off unless the user asks. Audio is the one thing this application has
+    /// never kept, and nobody's existing settings file may start keeping it.
+    pub retain_audio: bool,
 }
 
 /// Written out rather than derived, because `sound_cues` defaults on and a
-/// derived `Default` would default it off. That distinction is not academic:
+/// derived `Default` would default it off. `retain_audio` is the mirror of
+/// that case and matters more: a derive happens to be correct for it today,
+/// and relying on that for a privacy default is relying on an accident. That distinction is not academic:
 /// `serde(default)` fills the field for every settings file written before
 /// this setting existed, so a derive would silently turn the cues off for
 /// everyone who already had a settings.json.
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimal_mode: false, sound_cues: true, preferred_microphone: None }
+        Self {
+            minimal_mode: false,
+            sound_cues: true,
+            preferred_microphone: None,
+            retain_audio: false,
+        }
     }
 }
 
@@ -166,6 +179,25 @@ mod tests {
         let loaded = load(&dir);
         assert!(loaded.settings.minimal_mode);
         assert!(loaded.problem.is_none(), "an unknown field is not a fault");
+    }
+
+    /// The privacy default, protected in the one place it can quietly break.
+    /// Every settings file on disk today was written before retention existed,
+    /// so `serde(default)` is what decides retention for every existing
+    /// install, and it must decide it off.
+    #[test]
+    fn a_file_written_before_retention_existed_does_not_keep_audio() {
+        let dir = scratch("pre-retention");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"minimal_mode": true, "sound_cues": false}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir);
+        assert!(
+            !loaded.settings.retain_audio,
+            "an upgrade must never start keeping recordings on its own"
+        );
     }
 
     #[test]

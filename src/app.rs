@@ -145,6 +145,12 @@ struct WorkItem {
     speech_finished: Instant,
     queued_at: Instant,
     target_pid: Option<i32>,
+    /// Read from the settings when the dictation was queued, rather than when
+    /// it finishes, so one utterance is retained or not by what was true when
+    /// it was spoken. Travels with the item for the same reason `target_pid`
+    /// does: the pipeline thread does not own the settings and must not reach
+    /// across for them.
+    retain_audio: bool,
 }
 
 /// What became of one utterance. It either reached the cursor, in one of the
@@ -560,6 +566,7 @@ impl PrivacyFlowApp {
                         speech_finished,
                         queued_at: Instant::now(),
                         target_pid: self.target_pid.take(),
+                        retain_audio: self.state.settings.retain_audio,
                     }))
                     .is_err()
                 {
@@ -1115,6 +1122,48 @@ fn latency_trace_for(
 /// Utterance audio is temporary, but a crash or a force quit leaves the last
 /// WAV behind. The instance lock guarantees no other PrivacyFlow is running, so
 /// anything still here belongs to a previous run and must not outlive it.
+/// Keep this recording if the user asked for it, then delete it either way.
+///
+/// The delete is unconditional on purpose. Retention copies into the corpus, so
+/// the cache copy is always surplus, and a retention failure must leave nothing
+/// behind in a directory the user has been told is swept on every launch.
+///
+/// A retention failure is reported and does not touch the dictation: the words
+/// are already on their way to the cursor, and a corpus is not worth a lost
+/// utterance.
+fn release_audio(path: &Path, retain: bool, inference: &anyhow::Result<Reply>) {
+    if retain {
+        if let Some(outcome) = worth_retaining(inference) {
+            if let Err(error) = crate::retention::retain(path, &outcome) {
+                eprintln!("PrivacyFlow could not retain {}: {error}", path.display());
+            }
+        }
+    }
+    if let Err(error) = std::fs::remove_file(path) {
+        eprintln!("PrivacyFlow could not delete {} after transcription: {error}", path.display());
+    }
+}
+
+/// What the corpus records about this reply, or nothing when the reply says
+/// nothing about the audio.
+///
+/// A transcript and both rejections are all worth keeping: a rejection is where
+/// the application discarded words that were really said, which is the case a
+/// candidate recognizer most needs to be asked about. A worker that broke, or
+/// an utterance that failed after recognition, is not a statement about the
+/// recording and is not corpus.
+fn worth_retaining(inference: &anyhow::Result<Reply>) -> Option<crate::retention::Outcome<'_>> {
+    match inference {
+        Ok(Reply::Transcribed(result)) => Some(crate::retention::Outcome::Transcribed {
+            transcript: &result.transcript,
+            model: &result.asr_model,
+        }),
+        Ok(Reply::NoSpeech) => Some(crate::retention::Outcome::NoSpeech),
+        Ok(Reply::Unintelligible { .. }) => Some(crate::retention::Outcome::Unintelligible),
+        Ok(Reply::Failed { .. }) | Err(_) => None,
+    }
+}
+
 fn sweep_audio_cache(dir: &Path) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -1210,14 +1259,7 @@ fn process(
         Ok(worker) => worker.transcribe_and_route(&audio.path, audio.duration),
         Err(error) => Err(anyhow::anyhow!(error.clone())),
     };
-    // Audio is temporary and is never retained by the app, so a failure to
-    // delete it is a broken promise rather than a detail to swallow.
-    if let Err(error) = std::fs::remove_file(&audio.path) {
-        eprintln!(
-            "PrivacyFlow could not delete {} after transcription: {error}",
-            audio.path.display()
-        );
-    }
+    release_audio(&audio.path, item.retain_audio, &inference);
     let inference = match inference {
         Ok(Reply::Transcribed(inference)) => inference,
         // Nothing was said, so there is nothing to route, insert or file.
@@ -1471,6 +1513,66 @@ mod tests {
         assert_eq!(destination(None, CaptureEnd::Released), Destination::Clipboard);
         assert_eq!(destination(Some(4321), CaptureEnd::CeilingReached), Destination::Lost);
         assert_eq!(destination(None, CaptureEnd::BufferFull), Destination::Lost);
+    }
+
+    /// Retention off must still delete the recording. This is the promise the
+    /// application made before the setting existed, and it is the regression
+    /// that would matter most: a privacy default that quietly stopped applying.
+    #[test]
+    fn a_recording_is_deleted_when_retention_is_off() {
+        let dir = std::env::temp_dir().join(format!("privacyflow-release-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("utterance-20260923T101500.250Z.wav");
+        std::fs::write(&path, b"audio").unwrap();
+
+        release_audio(&path, false, &Ok(Reply::NoSpeech));
+
+        assert!(!path.exists(), "audio outlived its utterance with retention off");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// And the cache copy goes even when retention is on, because retention
+    /// copies into the corpus. Audio left here would be swept on the next
+    /// launch, but only after sitting somewhere the user was told it would not.
+    #[test]
+    fn the_cache_copy_goes_even_when_retention_is_on() {
+        let dir = std::env::temp_dir().join(format!("privacyflow-release-on-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("utterance-20260923T101501.000Z.wav");
+        std::fs::write(&path, b"audio").unwrap();
+
+        // Whether the corpus write itself succeeds depends on the research
+        // checkout, which a test must not write into. What is asserted is the
+        // part that holds either way: the cache copy does not survive.
+        release_audio(&path, true, &Err(anyhow::anyhow!("worker unavailable")));
+
+        assert!(!path.exists(), "the cache copy survived retention");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Which replies are corpus. A rejection is kept because it is where the
+    /// application threw away real words; a broken worker is not, because it
+    /// says nothing about the recording.
+    #[test]
+    fn only_replies_that_describe_the_audio_are_retained() {
+        assert!(worth_retaining(&Ok(Reply::NoSpeech)).is_some());
+        assert!(worth_retaining(&Ok(Reply::Unintelligible {
+            seconds: 1.0,
+            detail: "distrusted".to_owned(),
+        }))
+        .is_some());
+        assert!(
+            worth_retaining(&Err(anyhow::anyhow!("worker died"))).is_none(),
+            "a broken worker is not a statement about the audio"
+        );
+        assert!(
+            worth_retaining(&Ok(Reply::Failed {
+                message: "routing refused".to_owned(),
+                transcript: Some("the words".to_owned()),
+            }))
+            .is_none(),
+            "a post-recognition failure is outside the retained outcomes"
+        );
     }
 
     /// The promise is that dictation audio never outlives its utterance, and a

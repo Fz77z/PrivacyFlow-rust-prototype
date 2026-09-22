@@ -245,6 +245,28 @@ fn settings(
 
     microphone_choice(ui, state, data_dir, microphone);
 
+    ui.add_space(14.0);
+
+    let mut retain_audio = state.settings.retain_audio;
+    if ui.checkbox(&mut retain_audio, "Keep recordings").changed() {
+        state.settings.retain_audio = retain_audio;
+        save_settings(state, data_dir);
+    }
+    ui.add_space(2.0);
+    // Says plainly what is kept and where, because this is the one setting that
+    // reverses what the application otherwise promises about audio. Someone
+    // turning it on should not have to read the source to know what they get.
+    ui.label(
+        RichText::new(
+            "Keep each dictation's recording instead of deleting it, so a different speech \
+             model can be compared against your real speech later. Recordings are written to \
+             the research folder and are never uploaded. Off by default, and everything \
+             already recorded stays until you delete it.",
+        )
+        .small()
+        .color(theme::MUTED),
+    );
+
     if let Some(error) = &state.settings_write_error {
         ui.add_space(6.0);
         ui.colored_label(theme::ERROR_TEXT, format!("Not saved: {error}"));
