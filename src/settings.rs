@@ -18,12 +18,16 @@ use std::path::{Path, PathBuf};
 /// `serde(default)` means a field added by a later version is absent rather
 /// than fatal when an older file is read, and unknown fields are ignored, so
 /// a file written by a later version still loads here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub minimal_mode: bool,
     /// Whether a short sound confirms the start and end of a dictation.
     pub sound_cues: bool,
+    /// The microphone to record from whenever it is connected, by name. None
+    /// follows the system input, which is what macOS switches to a headset
+    /// the moment one connects.
+    pub preferred_microphone: Option<String>,
 }
 
 /// Written out rather than derived, because `sound_cues` defaults on and a
@@ -33,7 +37,7 @@ pub struct Settings {
 /// everyone who already had a settings.json.
 impl Default for Settings {
     fn default() -> Self {
-        Self { minimal_mode: false, sound_cues: true }
+        Self { minimal_mode: false, sound_cues: true, preferred_microphone: None }
     }
 }
 
@@ -85,9 +89,9 @@ pub fn load(data_dir: &Path) -> Load {
 /// come back to the caller: there is a control on screen showing the new
 /// value, and a write that failed leaves that control describing a state the
 /// application is not in.
-pub fn save(data_dir: &Path, settings: Settings) -> Result<(), String> {
+pub fn save(data_dir: &Path, settings: &Settings) -> Result<(), String> {
     let path = path(data_dir);
-    let text = serde_json::to_string_pretty(&settings)
+    let text = serde_json::to_string_pretty(settings)
         .map_err(|error| format!("Could not encode settings: {error}"))?;
     std::fs::write(&path, text)
         .map_err(|error| format!("Could not write {}: {error}", path.display()))
@@ -145,6 +149,7 @@ mod tests {
         let loaded = load(&dir);
         assert!(loaded.settings.minimal_mode);
         assert!(loaded.settings.sound_cues, "cues must not default off on upgrade");
+        assert_eq!(loaded.settings.preferred_microphone, None, "an upgrade follows the system input");
     }
 
     /// The appearance work will add fields to this file. A file written by a
@@ -166,8 +171,13 @@ mod tests {
     #[test]
     fn what_is_saved_is_what_loads_back() {
         let dir = scratch("roundtrip");
-        save(&dir, Settings { minimal_mode: true, ..Default::default() }).unwrap();
-        assert!(load(&dir).settings.minimal_mode);
+        let settings = Settings {
+            minimal_mode: true,
+            preferred_microphone: Some("MacBook Pro Microphone".to_owned()),
+            ..Default::default()
+        };
+        save(&dir, &settings).unwrap();
+        assert_eq!(load(&dir).settings, settings);
     }
 
     /// A write that cannot happen must come back as a value, not a printed
@@ -176,6 +186,6 @@ mod tests {
     #[test]
     fn a_write_that_cannot_happen_is_returned_not_printed() {
         let dir = scratch("unwritable").join("no-such-directory");
-        assert!(save(&dir, Settings { minimal_mode: true, ..Default::default() }).is_err());
+        assert!(save(&dir, &Settings { minimal_mode: true, ..Default::default() }).is_err());
     }
 }

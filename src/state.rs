@@ -263,6 +263,17 @@ pub struct AppState {
     /// checkbox rather than raised as a startup failure: no audio output
     /// costs the user a confirmation sound, not a dictation.
     pub cue_problem: Option<String>,
+    /// Why the microphone could not be opened, the last time it was tried.
+    /// Shown under the microphone choice, which is where someone who just
+    /// picked one will look.
+    pub microphone_problem: Option<String>,
+    /// Set when a different microphone is chosen, so the app reopens it
+    /// straight away rather than on the next press.
+    pub microphone_choice_changed: bool,
+    /// The connected inputs, listed once when the microphone list is opened
+    /// and dropped when it closes. Listing costs about 80 ms, far too much to
+    /// repeat every frame the list is showing.
+    pub microphone_choices: Option<Result<Vec<String>, String>>,
     /// When the capture was handed to the pipeline, while the capsule is
     /// still showing the state before it. The mirror of `done_at`: that one
     /// retires a state after a delay, this one promotes one.
@@ -298,6 +309,9 @@ impl Default for AppState {
             settings_problem: None,
             settings_write_error: None,
             cue_problem: None,
+            microphone_problem: None,
+            microphone_choice_changed: false,
+            microphone_choices: None,
             processing_since: None,
             done_at: None,
             toast: None,

@@ -39,8 +39,11 @@ Grant PrivacyFlow microphone, Accessibility, and Input Monitoring permissions wh
 The microphone prompt now appears at launch rather than at the first dictation, because the input stream is opened once at startup.
 Opening the device costs over a hundred milliseconds, and paying that on each keypress used to come out of the first moments of speech.
 The stream is paused as soon as it is opened and resumed only while you hold the hotkey, so the microphone is not live between dictations, or before the first one.
-PrivacyFlow records from the system input.
-If you change it, or the device disconnects, the next press reopens the microphone on whatever the system input is then, which costs that one press a little over a hundred milliseconds at its start.
+PrivacyFlow records from the system input unless you choose a microphone in Settings.
+A chosen microphone is used whenever it is connected, even when macOS switches its input to a headset such as AirPods.
+While it is not connected, PrivacyFlow records from the system input and says so in Settings and Status.
+Choosing a microphone reopens it straight away, with no restart.
+If the system input changes, or the device disconnects, the next press reopens the microphone, which costs that one press a little over a hundred milliseconds at its start.
 A device that disconnects mid-dictation ends the recording there: what was captured is transcribed and left on the clipboard, and it is not pasted.
 Then focus an editable application, hold Right Option while speaking, and release it.
 

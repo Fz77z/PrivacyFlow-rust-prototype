@@ -1,3 +1,4 @@
+use crate::audio::Microphone;
 use crate::state::{AppState, ConsoleTab, WorkerStatus};
 use crate::ui::theme;
 use egui::{Color32, RichText, Ui};
@@ -9,7 +10,7 @@ pub fn show(
     ctx: &egui::Context,
     state: &mut AppState,
     data_dir: &std::path::Path,
-    microphone_name: Option<&str>,
+    microphone: Option<&Microphone>,
 ) -> bool {
     let mut stay_open = true;
     // The shared `panel_fill` is transparent because the capsule paints its
@@ -23,8 +24,8 @@ pub fn show(
         ui.add_space(18.0);
         match state.console_tab {
             ConsoleTab::Activity => activity(ui, state),
-            ConsoleTab::Settings => settings(ui, ctx, state, data_dir),
-            ConsoleTab::Status => status(ui, state, data_dir, microphone_name),
+            ConsoleTab::Settings => settings(ui, ctx, state, data_dir, microphone),
+            ConsoleTab::Status => status(ui, state, data_dir, microphone),
         }
     });
     if ctx.input(|i| i.viewport().close_requested()) {
@@ -170,7 +171,13 @@ fn why_copied(insertion: Option<crate::platform::Insertion>) -> Option<&'static 
 /// One setting. The tab is thin because PrivacyFlow has one thing to configure,
 /// and it should look thin rather than be padded out with controls that do
 /// not exist.
-fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Path) {
+fn settings(
+    ui: &mut Ui,
+    ctx: &egui::Context,
+    state: &mut AppState,
+    data_dir: &std::path::Path,
+    microphone: Option<&Microphone>,
+) {
     if let Some(problem) = state.settings_problem.clone() {
         egui::Frame::none()
             .fill(theme::CARD_FILL)
@@ -198,14 +205,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     let mut minimal_mode = state.settings.minimal_mode;
     if ui.checkbox(&mut minimal_mode, "Minimal mode").changed() {
         state.settings.minimal_mode = minimal_mode;
-        state.settings_write_error = crate::settings::save(data_dir, state.settings).err();
-        // A successful write means the file is no longer whatever it was
-        // when it failed to read at startup: the banner above claims the bad
-        // file is untouched, which stops being true the moment this save
-        // succeeds.
-        if state.settings_write_error.is_none() {
-            state.settings_problem = None;
-        }
+        save_settings(state, data_dir);
     }
     ui.add_space(2.0);
     ui.label(
@@ -222,10 +222,7 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     let mut sound_cues = state.settings.sound_cues;
     if ui.checkbox(&mut sound_cues, "Sound cues").changed() {
         state.settings.sound_cues = sound_cues;
-        state.settings_write_error = crate::settings::save(data_dir, state.settings).err();
-        if state.settings_write_error.is_none() {
-            state.settings_problem = None;
-        }
+        save_settings(state, data_dir);
     }
     ui.add_space(2.0);
     ui.label(
@@ -244,6 +241,10 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
         ui.colored_label(theme::ERROR_TEXT, format!("Cannot play: {problem}"));
     }
 
+    ui.add_space(14.0);
+
+    microphone_choice(ui, state, data_dir, microphone);
+
     if let Some(error) = &state.settings_write_error {
         ui.add_space(6.0);
         ui.colored_label(theme::ERROR_TEXT, format!("Not saved: {error}"));
@@ -260,6 +261,99 @@ fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &s
     }
 }
 
+/// Write the settings and report the outcome beside the controls.
+fn save_settings(state: &mut AppState, data_dir: &std::path::Path) {
+    state.settings_write_error = crate::settings::save(data_dir, &state.settings).err();
+    // A successful write means the file is no longer whatever it was when it
+    // failed to read at startup: the banner above claims the bad file is
+    // untouched, which stops being true the moment this save succeeds.
+    if state.settings_write_error.is_none() {
+        state.settings_problem = None;
+    }
+}
+
+/// The microphone to prefer, chosen from the connected inputs.
+///
+/// A choice is saved and handed to the app to reopen at once, so it takes
+/// effect without a restart and a device that will not open says so here.
+fn microphone_choice(
+    ui: &mut Ui,
+    state: &mut AppState,
+    data_dir: &std::path::Path,
+    microphone: Option<&Microphone>,
+) {
+    let current = state.settings.preferred_microphone.clone();
+    let mut chosen: Option<Option<String>> = None;
+    let list = ui.horizontal(|ui| {
+        ui.label("Microphone");
+        egui::ComboBox::from_id_salt("microphone")
+            .selected_text(current.as_deref().unwrap_or("System default"))
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "System default").clicked() {
+                    chosen = Some(None);
+                }
+                let choices = state.microphone_choices.get_or_insert_with(|| {
+                    crate::audio::input_device_names().map_err(|error| format!("{error:#}"))
+                });
+                let names = match choices {
+                    Ok(names) => names.as_slice(),
+                    Err(error) => {
+                        ui.colored_label(theme::ERROR_TEXT, error.as_str());
+                        &[]
+                    }
+                };
+                for name in names {
+                    let is_current = current.as_deref() == Some(name.as_str());
+                    if ui.selectable_label(is_current, name).clicked() {
+                        chosen = Some(Some(name.clone()));
+                    }
+                }
+                // A saved choice that is not connected stays listed, so it
+                // does not vanish from the one place it can be seen.
+                if let Some(preferred) = &current {
+                    if !names.contains(preferred) {
+                        let _ = ui.selectable_label(true, format!("{preferred} (not connected)"));
+                    }
+                }
+            })
+            .inner
+    });
+    if list.inner.is_none() {
+        state.microphone_choices = None;
+    }
+
+    if let Some(choice) = chosen.filter(|choice| *choice != current) {
+        state.settings.preferred_microphone = choice;
+        state.microphone_choice_changed = true;
+        save_settings(state, data_dir);
+    }
+
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Record from this microphone whenever it is connected, even when macOS switches \
+             its input to a headset. When it is not connected, the system input is used.",
+        )
+        .small()
+        .color(theme::MUTED),
+    );
+    if let Some(preferred) = microphone.and_then(Microphone::missing_preferred) {
+        ui.add_space(6.0);
+        ui.colored_label(
+            theme::WARNING_TEXT,
+            format!(
+                "{preferred} is not connected, so recording from {}.",
+                microphone.map_or("", Microphone::device_name)
+            ),
+        );
+    }
+    if let Some(problem) = &state.microphone_problem {
+        ui.add_space(6.0);
+        ui.colored_label(theme::ERROR_TEXT, format!("Cannot open: {problem}"));
+    }
+}
+
 /// Read-only, and reports only what can actually be observed. This tab is for
 /// checking whether things are working, not for changing them; the Settings
 /// tab is where the settings live.
@@ -267,7 +361,7 @@ fn status(
     ui: &mut Ui,
     state: &AppState,
     data_dir: &std::path::Path,
-    microphone_name: Option<&str>,
+    microphone: Option<&Microphone>,
 ) {
     let worker = match &state.worker {
         WorkerStatus::Starting => ("Starting".to_owned(), theme::MUTED),
@@ -279,8 +373,14 @@ fn status(
     } else {
         ("Right Option - watcher did not install".to_owned(), theme::ERROR_TEXT)
     };
-    let microphone = match microphone_name {
-        Some(name) => (name.to_owned(), theme::LABEL),
+    let microphone = match microphone {
+        Some(microphone) => match microphone.missing_preferred() {
+            Some(preferred) => (
+                format!("{} - {preferred} is not connected", microphone.device_name()),
+                theme::WARNING_TEXT,
+            ),
+            None => (microphone.device_name().to_owned(), theme::LABEL),
+        },
         None => ("No device opened".to_owned(), theme::ERROR_TEXT),
     };
     // Verified at startup by asking the capsule's own window, rather than

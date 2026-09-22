@@ -290,16 +290,17 @@ impl PrivacyFlowApp {
         // The microphone is opened once, here, so a keypress only has to
         // restart an already-built stream instead of spending device setup out
         // of the first moments of speech...
-        let (microphone, microphone_error) = match Microphone::open() {
-            Ok(microphone) => (Some(microphone), None),
-            Err(error) => (
-                None,
-                Some(Failure::input_unavailable(
-                    "Microphone unavailable",
-                    format!("Microphone unavailable: {error:#}"),
-                )),
-            ),
-        };
+        let (microphone, microphone_problem) =
+            match Microphone::open(settings.settings.preferred_microphone.as_deref()) {
+                Ok(microphone) => (Some(microphone), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+        let microphone_error = microphone_problem.as_ref().map(|problem| {
+            Failure::input_unavailable(
+                "Microphone unavailable",
+                format!("Microphone unavailable: {problem}"),
+            )
+        });
         // Opened whatever the setting says, so toggling the checkbox never
         // has to build a stream while the user is waiting on it. A failure
         // here is deliberately not joined to the chain below: it costs a
@@ -320,6 +321,7 @@ impl PrivacyFlowApp {
             settings: settings.settings,
             settings_problem: settings.problem,
             cue_problem,
+            microphone_problem,
             ..Default::default()
         };
         // Losing this is a functional problem, not a cosmetic one: a capsule
@@ -441,20 +443,43 @@ impl PrivacyFlowApp {
         }
     }
 
-    /// The microphone to record from, reopened if the system input has
-    /// changed, if its device went away, or if there was none to open before.
+    /// The microphone to record from, reopened if the preference or the
+    /// device it leads to has changed, if its device went away, or if there
+    /// was none to open before.
     ///
     /// Reopening costs over a hundred milliseconds out of the start of the
     /// dictation, but only on the first press after a change. Recording from
     /// the old device instead would cost the whole dictation, silently.
     fn current_microphone(&mut self) -> anyhow::Result<&Microphone> {
+        let preferred = self.state.settings.preferred_microphone.as_deref();
         // A stale microphone is dropped here, before its replacement is
         // opened, so the old device is never held beside the new one.
-        let microphone = match self.microphone.take().filter(Microphone::is_current) {
+        let microphone = match self.microphone.take().filter(|m| m.is_current(preferred)) {
             Some(microphone) => microphone,
-            None => Microphone::open()?,
+            None => match Microphone::open(preferred) {
+                Ok(microphone) => microphone,
+                Err(error) => {
+                    self.state.microphone_problem = Some(format!("{error:#}"));
+                    return Err(error);
+                }
+            },
         };
+        self.state.microphone_problem = None;
         Ok(self.microphone.insert(microphone))
+    }
+
+    /// Reopen the microphone as soon as a different one is chosen, so the
+    /// change takes effect, and a device that will not open says so, while
+    /// the user is still looking at the choice. A dictation in progress keeps
+    /// the device it started on; the change is picked up once it ends.
+    fn follow_microphone_choice(&mut self) {
+        if !self.state.microphone_choice_changed || self.recording_started.is_some() {
+            return;
+        }
+        self.state.microphone_choice_changed = false;
+        // The failure is already recorded where the choice was made, which
+        // is the only place it needs to be seen.
+        let _ = self.current_microphone();
     }
 
     /// Play a cue, if the user wants them and there is anything to play them
@@ -825,6 +850,7 @@ impl eframe::App for PrivacyFlowApp {
         if self.state.console_open {
             self.show_console(ctx, raise_console);
         }
+        self.follow_microphone_choice();
     }
 }
 
@@ -983,7 +1009,7 @@ impl PrivacyFlowApp {
             .with_min_inner_size([520.0, 400.0]);
         let data_dir = self.data_dir.clone();
         let state = &mut self.state;
-        let microphone_name = self.microphone.as_ref().map(|m| m.device_name());
+        let microphone = self.microphone.as_ref();
         // Immediate rather than deferred: a deferred viewport's callback must be
         // Fn + Send + Sync + 'static, which would force AppState behind a mutex
         // for no reason other than the signature.
@@ -994,7 +1020,7 @@ impl PrivacyFlowApp {
                 if raise_console {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                ui::console::show(ctx, state, &data_dir, microphone_name)
+                ui::console::show(ctx, state, &data_dir, microphone)
             },
         );
         if !stay_open {

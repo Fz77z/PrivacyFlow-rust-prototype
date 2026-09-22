@@ -29,8 +29,8 @@ const MAX_RECORDING_SECONDS: usize = 300;
 /// same gain.
 const TARGET_BUFFER_FRAMES: u32 = 128;
 
-/// A microphone opened ahead of the keypress and kept open until the system
-/// input changes or its device goes away.
+/// A microphone opened ahead of the keypress and kept open until it is no
+/// longer the device to record from, or its device goes away.
 ///
 /// Opening the device and building the stream costs over a hundred
 /// milliseconds, and doing that when the hotkey is pressed spends it out of
@@ -39,9 +39,10 @@ const TARGET_BUFFER_FRAMES: u32 = 128;
 ///
 /// It is bound to one device, not to whatever the system input is at the
 /// moment: CoreAudio keeps a stream on the device it was built for. So it
-/// remembers which device that was, and records whether the stream has failed, which
-/// is how CoreAudio reports the device going away. `is_current` answers
-/// whether it is still the right thing to record from.
+/// remembers which device that was and why it was chosen, and records whether
+/// the stream has failed, which is how CoreAudio reports the device going
+/// away. `is_current` answers whether it is still the right thing to record
+/// from.
 ///
 /// The stream is paused whenever PrivacyFlow is not recording, so the
 /// microphone is not live between dictations, and it is not live before the
@@ -63,18 +64,18 @@ pub struct Microphone {
     sample_rate: u32,
     level: Arc<AtomicU32>,
     overflowed: Arc<AtomicBool>,
-    device_name: String,
+    binding: Binding,
     /// What this recording measures so far, so a press heading for refusal
     /// can be answered while it is still being held.
     recorded: Arc<RecordedLevel>,
 }
 
 impl Microphone {
-    pub fn open() -> Result<Self> {
+    /// Open the preferred microphone, or the system input when there is no
+    /// preference or the preferred one is not connected.
+    pub fn open(preferred: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("No input microphone found"))?;
+        let (device, route) = choose_device(&host, preferred)?;
         let name = device
             .name()
             .unwrap_or_else(|_| "unnamed input device".to_owned());
@@ -176,7 +177,11 @@ impl Microphone {
             level,
             recorded,
             overflowed,
-            device_name: name,
+            binding: Binding {
+                preferred: preferred.map(str::to_owned),
+                route,
+                device_name: name,
+            },
         })
     }
 
@@ -222,26 +227,27 @@ impl Microphone {
             samples: self.samples.clone(),
             sample_rate: self.sample_rate,
             truncated: self.overflowed.load(Ordering::Relaxed),
-            device_name: self.device_name.clone(),
+            device_name: self.binding.device_name.clone(),
         })
     }
 
-    /// Whether this is still the microphone to record from: the stream has
-    /// not failed, and the device is still the system input.
+    /// Whether this is still the microphone to record from, given the
+    /// preference now: the stream has not failed, and the device is still the
+    /// one that preference leads to.
     ///
-    /// Cheap enough to ask on every keypress. It is a single CoreAudio
-    /// property read, which is far less than the stream build it can save.
-    pub fn is_current(&self) -> bool {
+    /// Cheap enough to ask on every keypress. At most it reads the system
+    /// input and the names of the devices, about half a millisecond, which is
+    /// far less than the stream build it can save.
+    pub fn is_current(&self, preferred: Option<&str>) -> bool {
         if self.has_failed() {
             return false;
         }
-        // Compared by name because cpal exposes no device identity. Two inputs
-        // with the same name would be mistaken for one another, which is the
-        // one switch this does not see.
-        cpal::default_host()
-            .default_input_device()
-            .and_then(|device| device.name().ok())
-            .is_some_and(|name| name == self.device_name)
+        let host = cpal::default_host();
+        self.binding.is_current(
+            preferred,
+            || host.default_input_device().and_then(|device| device.name().ok()),
+            |name| count_devices_named(&host, name).ok(),
+        )
     }
 
     /// Whether the stream has failed since it was opened, which on macOS means
@@ -267,8 +273,131 @@ impl Microphone {
     /// high quality profile every time you dictate, and nothing on screen
     /// would say why the music broke up.
     pub fn device_name(&self) -> &str {
-        &self.device_name
+        &self.binding.device_name
     }
+
+    /// The preferred microphone this one is standing in for, if the preferred
+    /// one was not connected when it was opened.
+    pub fn missing_preferred(&self) -> Option<&str> {
+        match self.binding.route {
+            Route::PreferredMissing { .. } => self.binding.preferred.as_deref(),
+            Route::SystemDefault | Route::Preferred => None,
+        }
+    }
+}
+
+/// Which device a microphone was opened on, and the preference that led
+/// there. Kept apart from the stream so the question of whether it is still
+/// the right device can be answered, and tested, without hardware.
+#[derive(Debug)]
+struct Binding {
+    preferred: Option<String>,
+    route: Route,
+    device_name: String,
+}
+
+/// How the device was arrived at.
+#[derive(Debug)]
+enum Route {
+    /// There was no preference, so the system input.
+    SystemDefault,
+    /// The preferred microphone.
+    Preferred,
+    /// The preferred microphone was not connected, so the system input stands
+    /// in for it. Remembers how many devices carried the preferred name then,
+    /// so one more appearing is noticed. It is a count rather than a yes or
+    /// no because a headset's output half shares its name with its microphone
+    /// and can be present on its own.
+    PreferredMissing { devices_named_preferred: usize },
+}
+
+impl Binding {
+    /// Whether this is still the device the preference leads to.
+    ///
+    /// The observations are passed in, and asked for only when the route
+    /// needs them, because each is a CoreAudio query on the keypress path.
+    fn is_current(
+        &self,
+        preferred: Option<&str>,
+        system_input_name: impl FnOnce() -> Option<String>,
+        devices_named: impl FnOnce(&str) -> Option<usize>,
+    ) -> bool {
+        if self.preferred.as_deref() != preferred {
+            return false;
+        }
+        // Devices are compared by name because cpal exposes no device
+        // identity. Two inputs with the same name would be mistaken for one
+        // another, which is the one switch this does not see.
+        let is_system_input =
+            || system_input_name().is_some_and(|name| name == self.device_name);
+        match (&self.route, preferred) {
+            // A preferred microphone that goes away fails its stream, which
+            // the caller has already checked. Nothing else retires it, which
+            // is the point: the system input changing is not its concern.
+            (Route::Preferred, _) => true,
+            (Route::SystemDefault, _) => is_system_input(),
+            (Route::PreferredMissing { devices_named_preferred }, Some(preferred)) => {
+                devices_named(preferred) == Some(*devices_named_preferred) && is_system_input()
+            }
+            (Route::PreferredMissing { .. }, None) => false,
+        }
+    }
+}
+
+/// The device to open for a preference, and how it was arrived at.
+///
+/// A preferred microphone that is not connected is stood in for by the system
+/// input rather than refused, and the route says so, so the console can show
+/// that the preference is not being met.
+fn choose_device(host: &cpal::Host, preferred: Option<&str>) -> Result<(cpal::Device, Route)> {
+    if let Some(preferred) = preferred {
+        if let Some(device) = find_input_named(host, preferred)? {
+            return Ok((device, Route::Preferred));
+        }
+    }
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow!("No input microphone found"))?;
+    let route = match preferred {
+        None => Route::SystemDefault,
+        Some(preferred) => Route::PreferredMissing {
+            devices_named_preferred: count_devices_named(host, preferred)?,
+        },
+    };
+    Ok((device, route))
+}
+
+/// The input device with this name, if one is connected.
+///
+/// Searches every device by name first and asks only the matches whether they
+/// record, because asking every device costs about 80 ms and a name costs
+/// almost nothing. A headset appears twice under one name, once per direction.
+fn find_input_named(host: &cpal::Host, name: &str) -> Result<Option<cpal::Device>> {
+    Ok(host
+        .devices()
+        .context("Could not list audio devices")?
+        .filter(|device| device.name().is_ok_and(|device_name| device_name == name))
+        .find(|device| device.default_input_config().is_ok()))
+}
+
+fn count_devices_named(host: &cpal::Host, name: &str) -> Result<usize> {
+    Ok(host
+        .devices()
+        .context("Could not list audio devices")?
+        .filter(|device| device.name().is_ok_and(|device_name| device_name == name))
+        .count())
+}
+
+/// The names of every connected input, for choosing one.
+///
+/// Slow, about 80 ms, because cpal asks each device what it can record. Meant
+/// for when the user opens the list, not for the keypress path.
+pub fn input_device_names() -> Result<Vec<String>> {
+    Ok(cpal::default_host()
+        .input_devices()
+        .context("Could not list microphones")?
+        .filter_map(|device| device.name().ok())
+        .collect())
 }
 
 /// Ask for a small buffer, but never one the device has said it cannot serve.
@@ -854,5 +983,86 @@ mod tests {
 
         let unknown = requested_buffer_size(&SupportedBufferSize::Unknown);
         assert!(matches!(unknown, BufferSize::Default));
+    }
+
+    /// A binding as `Microphone::open` would record it, for the staleness
+    /// tests below.
+    fn binding(preferred: Option<&str>, route: Route, device_name: &str) -> Binding {
+        Binding {
+            preferred: preferred.map(str::to_owned),
+            route,
+            device_name: device_name.to_owned(),
+        }
+    }
+
+    /// The reason the preference exists: AirPods connecting makes them the
+    /// system input, and that must not pull a preferred microphone away.
+    #[test]
+    fn a_preferred_microphone_ignores_the_system_input_changing() {
+        let opened = binding(Some("MacBook Pro Microphone"), Route::Preferred, "MacBook Pro Microphone");
+        assert!(opened.is_current(
+            Some("MacBook Pro Microphone"),
+            || Some("AirPods Pro".to_owned()),
+            |_| Some(1),
+        ));
+    }
+
+    /// Standing in for a missing preferred microphone is temporary. When it
+    /// connects again, the next press must record from it.
+    #[test]
+    fn a_stand_in_gives_way_when_the_preferred_microphone_returns() {
+        let opened = binding(
+            Some("MacBook Pro Microphone"),
+            Route::PreferredMissing { devices_named_preferred: 0 },
+            "AirPods Pro",
+        );
+        assert!(!opened.is_current(
+            Some("MacBook Pro Microphone"),
+            || Some("AirPods Pro".to_owned()),
+            |_| Some(1),
+        ));
+        assert!(opened.is_current(
+            Some("MacBook Pro Microphone"),
+            || Some("AirPods Pro".to_owned()),
+            |_| Some(0),
+        ));
+    }
+
+    /// A stand-in is the system input, so it follows the system input like
+    /// any other.
+    #[test]
+    fn a_stand_in_follows_the_system_input() {
+        let opened = binding(
+            Some("MacBook Pro Microphone"),
+            Route::PreferredMissing { devices_named_preferred: 0 },
+            "AirPods Pro",
+        );
+        assert!(!opened.is_current(
+            Some("MacBook Pro Microphone"),
+            || Some("fifine Microphone".to_owned()),
+            |_| Some(0),
+        ));
+    }
+
+    /// With no preference, the microphone is whatever the system input is.
+    #[test]
+    fn without_a_preference_the_system_input_is_followed() {
+        let opened = binding(None, Route::SystemDefault, "MacBook Pro Microphone");
+        assert!(opened.is_current(None, || Some("MacBook Pro Microphone".to_owned()), |_| Some(0)));
+        assert!(!opened.is_current(None, || Some("AirPods Pro".to_owned()), |_| Some(0)));
+    }
+
+    /// Choosing a different microphone in Settings must take effect without a
+    /// restart, which means the open one is no longer current.
+    #[test]
+    fn changing_the_preference_retires_the_open_microphone() {
+        let opened = binding(None, Route::SystemDefault, "AirPods Pro");
+        assert!(!opened.is_current(
+            Some("MacBook Pro Microphone"),
+            || Some("AirPods Pro".to_owned()),
+            |_| Some(1),
+        ));
+        let preferred = binding(Some("MacBook Pro Microphone"), Route::Preferred, "MacBook Pro Microphone");
+        assert!(!preferred.is_current(None, || Some("MacBook Pro Microphone".to_owned()), |_| Some(1)));
     }
 }
