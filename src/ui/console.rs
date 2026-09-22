@@ -15,27 +15,15 @@ pub fn show(
     // The shared `panel_fill` is transparent because the capsule paints its
     // own shape into a transparent window. This window is an ordinary opaque
     // one, so it states its background instead of inheriting that.
-    let frame = egui::Frame::central_panel(&ctx.style()).fill(theme::FILL);
+    let frame = egui::Frame::central_panel(&ctx.style())
+        .fill(theme::FILL)
+        .inner_margin(egui::Margin::same(20.0));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut state.console_tab, ConsoleTab::Activity, "Activity");
-            ui.selectable_value(&mut state.console_tab, ConsoleTab::Settings, "Settings");
-            ui.selectable_value(&mut state.console_tab, ConsoleTab::Status, "Status");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Quit LocalFlow").clicked() {
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Close,
-                    );
-                }
-            });
-        });
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(10.0);
+        tab_bar(ui, &mut state.console_tab);
+        ui.add_space(18.0);
         match state.console_tab {
             ConsoleTab::Activity => activity(ui, state),
-            ConsoleTab::Settings => settings(ui, state, data_dir),
+            ConsoleTab::Settings => settings(ui, ctx, state, data_dir),
             ConsoleTab::Status => status(ui, state, data_dir, microphone_name),
         }
     });
@@ -45,72 +33,122 @@ pub fn show(
     stay_open
 }
 
+/// The three tabs as one segmented control, which is how macOS presents a
+/// choice between views, rather than as three loose buttons.
+fn tab_bar(ui: &mut Ui, tab: &mut ConsoleTab) {
+    egui::Frame::none()
+        .fill(theme::CARD_FILL)
+        .rounding(egui::Rounding::same(9.0))
+        .inner_margin(egui::Margin::same(3.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (value, name) in [
+                    (ConsoleTab::Activity, "Activity"),
+                    (ConsoleTab::Settings, "Settings"),
+                    (ConsoleTab::Status, "Status"),
+                ] {
+                    ui.selectable_value(tab, value, name);
+                }
+            });
+        });
+}
+
+/// The history, newest first as recorded. Each card leads with what the user
+/// said, because that is what they came to find; how it got there is one
+/// click away rather than competing with it.
 fn activity(ui: &mut Ui, state: &AppState) {
     if state.history.is_empty() {
         ui.label(RichText::new("Nothing dictated yet.").color(theme::MUTED));
         return;
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for record in &state.history {
-            egui::Frame::none()
-                .fill(theme::CARD_FILL)
-                .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                .rounding(egui::Rounding::same(10.0))
-                .inner_margin(egui::Margin::same(14.0))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(
-                        RichText::new(record.timestamp.format("%H:%M:%S").to_string()).strong(),
-                    );
-                    // A dictation that was heard and not understood has no
-                    // transcript, route, output or timings to show. The whole
-                    // of what is known about it is the remark, so the card is
-                    // that remark rather than a form of empty fields.
-                    if let Some(note) = &record.note {
-                        ui.add_space(5.0);
-                        ui.colored_label(theme::MUTED, note);
-                        return;
-                    }
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("ASR").small().strong());
-                    ui.monospace(&record.transcript);
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Route").small().strong());
-                        ui.monospace(record.route.map(|route| route.as_str()).unwrap_or("—"));
-                    });
-                    ui.label(RichText::new("Output").small().strong());
-                    ui.monospace(&record.output);
-                    ui.add_space(6.0);
-                    ui.small(format!(
-                        "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
-                        opt_ms(record.timings.audio_ms),
-                        opt_ms(record.timings.capture_finalize_ms),
-                        opt_ms(record.timings.queue_ms),
-                        opt_ms(record.timings.asr_ms),
-                        opt_ms(record.timings.router_ms),
-                        opt_ms(record.timings.transform_ms),
-                        opt_ms(record.timings.insert_ms),
-                        opt_ms(record.timings.total_ms),
-                    ));
-                    // Both the capsule's "Copied" and the toast that goes
-                    // with it are gone within seconds, and they appear
-                    // precisely when the text did not land where the user was
-                    // looking. The durable record has to carry the reason.
-                    if let Some(why) = why_copied(record.insertion) {
-                        ui.add_space(5.0);
-                        ui.colored_label(theme::MUTED, why);
-                    }
-                    // The console keeps the original message, whatever the
-                    // capsule had room to say.
-                    if let Some(failure) = &record.failure {
-                        ui.add_space(5.0);
-                        ui.colored_label(theme::ERROR_TEXT, &failure.detail);
-                    }
-                });
-            ui.add_space(8.0);
+        for (index, record) in state.history.iter().enumerate() {
+            ui.push_id(index, |ui| history_card(ui, record));
+            ui.add_space(10.0);
         }
     });
+}
+
+fn history_card(ui: &mut Ui, record: &crate::state::DebugRecord) {
+    egui::Frame::none()
+        .fill(theme::CARD_FILL)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            // Shown in the user's own time zone. The record is kept in UTC,
+            // which is right for storing and wrong for reading.
+            let time = record.timestamp.with_timezone(&chrono::Local).format("%H:%M");
+            ui.label(RichText::new(time.to_string()).small().color(theme::MUTED));
+            ui.add_space(6.0);
+
+            // A dictation that was heard and not understood has no
+            // transcript, route, output or timings to show. The whole of
+            // what is known about it is the remark, so the card is that
+            // remark rather than a form of empty fields.
+            if let Some(note) = &record.note {
+                ui.colored_label(theme::MUTED, note);
+                return;
+            }
+
+            // What reached the user, or failing that what was heard.
+            let words = if record.output.is_empty() { &record.transcript } else { &record.output };
+            if !words.is_empty() {
+                ui.label(RichText::new(words).size(14.5).color(theme::LABEL));
+            }
+            // Both the capsule's "Copied" and the toast that goes with it are
+            // gone within seconds, and they appear precisely when the text
+            // did not land where the user was looking. The durable record
+            // has to carry the reason.
+            if let Some(why) = why_copied(record.insertion) {
+                ui.add_space(6.0);
+                ui.colored_label(theme::MUTED, why);
+            }
+            // The console keeps the original message, whatever the capsule
+            // had room to say.
+            if let Some(failure) = &record.failure {
+                ui.add_space(6.0);
+                ui.colored_label(theme::ERROR_TEXT, &failure.detail);
+            }
+
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new(RichText::new("Details").small().color(theme::MUTED))
+                .id_salt("details")
+                .show(ui, |ui| details(ui, record));
+        });
+}
+
+/// How a dictation was produced: what was heard, how it was routed, and
+/// where the time went. For diagnosing, so it is kept out of the way.
+fn details(ui: &mut Ui, record: &crate::state::DebugRecord) {
+    egui::Grid::new("details").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+        row(ui, "Heard", &record.transcript, theme::LABEL);
+        row(
+            ui,
+            "Route",
+            record.route.map(|route| route.as_str()).unwrap_or("—"),
+            theme::LABEL,
+        );
+        row(ui, "Output", &record.output, theme::LABEL);
+    });
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!(
+            "audio {} · finalize {} · queue {} · ASR {} · router {} · S1 {} · insert {} · total {} ms",
+            opt_ms(record.timings.audio_ms),
+            opt_ms(record.timings.capture_finalize_ms),
+            opt_ms(record.timings.queue_ms),
+            opt_ms(record.timings.asr_ms),
+            opt_ms(record.timings.router_ms),
+            opt_ms(record.timings.transform_ms),
+            opt_ms(record.timings.insert_ms),
+            opt_ms(record.timings.total_ms),
+        ))
+        .small()
+        .color(theme::MUTED),
+    );
 }
 
 /// Why a dictation was left on the clipboard, for the two endings where it
@@ -132,7 +170,7 @@ fn why_copied(insertion: Option<crate::platform::Insertion>) -> Option<&'static 
 /// One setting. The tab is thin because LocalFlow has one thing to configure,
 /// and it should look thin rather than be padded out with controls that do
 /// not exist.
-fn settings(ui: &mut Ui, state: &mut AppState, data_dir: &std::path::Path) {
+fn settings(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState, data_dir: &std::path::Path) {
     if let Some(problem) = state.settings_problem.clone() {
         egui::Frame::none()
             .fill(theme::CARD_FILL)
@@ -181,6 +219,16 @@ fn settings(ui: &mut Ui, state: &mut AppState, data_dir: &std::path::Path) {
     if let Some(error) = &state.settings_write_error {
         ui.add_space(6.0);
         ui.colored_label(theme::ERROR_TEXT, format!("Not saved: {error}"));
+    }
+
+    // Quitting is rare and final, so it lives at the foot of Settings rather
+    // than beside the tabs, where it was the most prominent control in the
+    // window. The capsule's right-click menu offers it too.
+    ui.add_space(28.0);
+    ui.separator();
+    ui.add_space(10.0);
+    if ui.button("Quit LocalFlow").clicked() {
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
     }
 }
 

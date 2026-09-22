@@ -1228,8 +1228,30 @@ fn install_visuals(ctx: &egui::Context) {
     visuals.window_fill = crate::ui::theme::FILL;
     visuals.panel_fill = egui::Color32::TRANSPARENT;
     visuals.window_rounding = egui::Rounding::same(16.0);
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(39, 44, 55);
+    // Neutral greys, stepping lighter as a control is hovered and pressed.
+    // egui's defaults, and the blue-grey that replaced them, tinted every
+    // control against surfaces that are deliberately neutral, and its blue
+    // selection made the console's tabs the loudest thing in the window.
+    let controls = [
+        (&mut visuals.widgets.inactive, egui::Color32::from_rgb(32, 32, 32)),
+        (&mut visuals.widgets.hovered, egui::Color32::from_rgb(44, 44, 44)),
+        (&mut visuals.widgets.active, egui::Color32::from_rgb(54, 54, 54)),
+    ];
+    for (widget, fill) in controls {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke = egui::Stroke::NONE;
+        widget.rounding = egui::Rounding::same(7.0);
+    }
+    visuals.widgets.noninteractive.bg_stroke =
+        egui::Stroke::new(1.0, crate::ui::theme::BORDER);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(52, 52, 52);
+    visuals.selection.stroke = egui::Stroke::new(1.0, crate::ui::theme::LABEL);
     ctx.set_visuals(visuals);
+    ctx.style_mut(|style| {
+        style.spacing.button_padding = egui::vec2(12.0, 5.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    });
 }
 
 #[cfg(test)]
