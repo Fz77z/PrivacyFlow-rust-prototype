@@ -558,10 +558,12 @@ mod tests {
         let bead = Rect::from_center_size(Pos2::new(500.0, 500.0), theme::BEAD_SIZE);
         let mark = mark_rect_for(bead);
         assert_eq!(mark.center().x, bead.center().x);
-        assert_eq!(
-            mark.size(),
-            theme::MARK_SIZE * (theme::BEAD_SIZE.y / theme::CAPSULE_SIZE.y),
-            "the mark scales with the capsule, so the widget keeps its proportions"
+        let expected = theme::MARK_SIZE * (theme::BEAD_SIZE.y / theme::CAPSULE_SIZE.y);
+        assert!(
+            (mark.size() - expected).length() < 1e-3,
+            "the mark scales with the capsule, so the widget keeps its proportions: \
+             {:?} against {expected:?}",
+            mark.size()
         );
     }
 

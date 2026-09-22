@@ -113,7 +113,18 @@ fn animated_height(
         return resting;
     }
     match appearance.state {
-        HudState::Listening => (resting + level * 0.9).clamp(0.18, 1.0),
+        HudState::Listening => {
+            // Raising every bar by the same amount kept the silhouette and
+            // only nudged it, which did not read as hearing anything. Each
+            // bar instead swings on its own phase, and the voice decides how
+            // far the bars travel from rest towards that swing. The square
+            // root lifts ordinary speaking volume, which sits low on the
+            // linear level, into a visible share of the range.
+            let loudness = level.clamp(0.0, 1.0).sqrt();
+            let swing = (time as f32 * 9.0 + index as f32 * 1.9).sin() * 0.5 + 0.5;
+            let target = 0.25 + 0.75 * swing;
+            (resting + (target - resting) * loudness).clamp(0.18, 1.0)
+        }
         HudState::Processing => {
             let shimmer = (time as f32 * 2.0 + index as f32 * 0.7).sin() * 0.5 + 0.5;
             (resting * 0.7 + shimmer * 0.3).clamp(0.18, 1.0)

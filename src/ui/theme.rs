@@ -17,13 +17,14 @@ pub const ICON_SIZE: f32 = 36.0;
 pub const ICON_RADIUS: f32 = 11.0;
 /// The bead: the capsule at rest in minimal mode.
 ///
-/// Exactly half the dictating size in both axes, so growing from one to the
-/// other is a pure scale. Anything else changes the widget's proportions
-/// mid-animation, which reads as the shape deforming rather than as one
-/// object getting bigger.
-pub const BEAD_SIZE: Vec2 = Vec2::new(56.0, 28.0);
-/// The dictating size. The bead at twice the scale, same shape, so beginning
-/// to speak reads as the capsule growing rather than as a new thing arriving.
+/// Only slightly smaller than the dictating size, and the same 2:1 shape, so
+/// growing from one to the other is a pure scale. Anything else changes the
+/// widget's proportions mid-animation, which reads as the shape deforming
+/// rather than as one object getting bigger.
+pub const BEAD_SIZE: Vec2 = Vec2::new(72.0, 36.0);
+/// The dictating size. The bead at a slightly larger scale, same shape, so
+/// beginning to speak reads as the capsule growing rather than as a new thing
+/// arriving.
 pub const ACTIVE_SIZE: Vec2 = Vec2::new(88.0, 44.0);
 
 /// The window itself, which never changes size.
