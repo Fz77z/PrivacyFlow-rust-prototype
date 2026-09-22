@@ -56,9 +56,15 @@ pub enum Reply {
     /// Speech was heard and could not be decoded. Distinct from silence
     /// because the user did say something and it was thrown away, and it
     /// carries the numbers behind that so the console can show them.
+    ///
+    /// `detail` is composed by the worker rather than here, because there is
+    /// more than one way for a decode to be refused and the number that
+    /// explains one says nothing about the other: a repetition loop scored a
+    /// perfectly healthy log probability while it was looping. It is
+    /// measurements only, never any part of what was decoded.
     Unintelligible {
         seconds: f64,
-        confidence: f64,
+        detail: String,
     },
     /// The utterance failed after the worker had already recognised speech.
     /// It carries the transcript so the words can be preserved rather than
@@ -266,7 +272,7 @@ struct Response {
     no_speech: Option<bool>,
     unintelligible: Option<bool>,
     audio_seconds: Option<f64>,
-    avg_logprob: Option<f64>,
+    detail: Option<String>,
 }
 
 /// What the worker said about a warm-up request.
@@ -328,7 +334,7 @@ fn parse_response(line: &str) -> Result<Reply> {
     if response.unintelligible == Some(true) {
         return Ok(Reply::Unintelligible {
             seconds: response.audio_seconds.unwrap_or_default(),
-            confidence: response.avg_logprob.unwrap_or_default(),
+            detail: response.detail.unwrap_or_else(|| "no reason given".to_owned()),
         });
     }
 
@@ -599,17 +605,45 @@ mod tests {
     #[test]
     fn an_unintelligible_decode_is_its_own_reply_not_silence() {
         let reply = parse_response(
-            r#"{"unintelligible": true, "audio_seconds": 2.763, "avg_logprob": -7.8905}"#,
+            r#"{"unintelligible": true, "audio_seconds": 2.763,
+                "detail": "average log probability -7.89, floor -1"}"#,
         )
         .unwrap();
         match reply {
-            Reply::Unintelligible { seconds, confidence } => {
+            Reply::Unintelligible { seconds, detail } => {
                 assert_eq!(seconds, 2.763);
-                assert_eq!(confidence, -7.8905);
+                assert_eq!(detail, "average log probability -7.89, floor -1");
             }
             other => panic!("expected an unintelligible reply, got {other:?}"),
         }
         assert!(matches!(parse_response(r#"{"no_speech": true}"#).unwrap(), Reply::NoSpeech));
+    }
+
+    /// The exact bytes the worker emits for a repetition loop, copied from its
+    /// output rather than written by hand here.
+    ///
+    /// This is the half of the contract a Rust test can hold: the worker
+    /// composes the phrase because it owns the thresholds, so the only thing
+    /// that can silently break is the two sides disagreeing on the field. A
+    /// mismatch would reach the user as "no reason given" beside a refusal,
+    /// which looks like the worker being unhelpful rather than like a bug here.
+    #[test]
+    fn a_repetition_loop_arrives_with_the_number_that_actually_failed() {
+        let reply = parse_response(
+            r#"{"unintelligible": true, "audio_seconds": 5.296, "detail": "compression ratio 9.16, ceiling 2.4"}"#,
+        )
+        .unwrap();
+        match reply {
+            Reply::Unintelligible { seconds, detail } => {
+                assert_eq!(seconds, 5.296);
+                assert_eq!(detail, "compression ratio 9.16, ceiling 2.4");
+                // The log probability was -0.179 while this was looping, which
+                // is healthier than the median dictation. Showing it as the
+                // reason is the mistake this field exists to prevent.
+                assert!(!detail.contains("log probability"));
+            }
+            other => panic!("expected an unintelligible reply, got {other:?}"),
+        }
     }
 
     /// A reply that carries an error is a failure whatever else it says, so

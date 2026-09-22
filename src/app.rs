@@ -1128,10 +1128,10 @@ fn process(
         // Heard and not decoded. The words are gone either way, but the user
         // said something, so the app says so rather than settling back as
         // though the key had never been pressed.
-        Ok(Reply::Unintelligible { seconds, confidence }) => {
+        Ok(Reply::Unintelligible { seconds, detail }) => {
             return PipelineMessage::NotUnderstood {
                 note: format!(
-                    "Heard {seconds:.1} s and could not decode it (confidence                      {confidence:.2}). Nothing was inserted."
+                    "Heard {seconds:.1} s and could not decode it ({detail}).                      Nothing was inserted."
                 ),
             }
         }
