@@ -133,8 +133,8 @@ fn destination(target_pid: Option<i32>, capture_end: CaptureEnd) -> Destination 
 /// One channel for both, so a warm-up can never overtake the dictation it was
 /// sent ahead of.
 enum Work {
-    /// The user has started speaking. Make the router resident before the
-    /// dictation needs it.
+    /// The user has started speaking. Make the models resident before the
+    /// dictation needs them.
     Prepare,
     Dictation(WorkItem),
 }
@@ -1150,7 +1150,7 @@ fn prepare(worker: &mut Result<KevWorker, String>) {
         return;
     };
     if let Err(error) = worker.prepare() {
-        eprintln!("PrivacyFlow could not prepare the router for this dictation: {error:#}");
+        eprintln!("PrivacyFlow could not prepare the models for this dictation: {error:#}");
     }
 }
 

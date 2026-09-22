@@ -155,14 +155,16 @@ impl KevWorker {
         Ok(worker)
     }
 
-    /// Ask the worker to make the router's weights resident while the user is
-    /// still speaking.
+    /// Ask the worker to make the router and the text processor resident
+    /// while the user is still speaking.
     ///
-    /// Under memory pressure macOS compresses Kev's idle weights within
-    /// seconds, and decompressing them used to cost the first route after a
-    /// pause roughly 450ms. Paying that during speech takes it off the wait
-    /// after release. A dictation released before this finishes waits for the
-    /// remainder, which is work its own route would otherwise have done.
+    /// Under memory pressure macOS compresses idle weights within seconds,
+    /// and decompressing them used to cost the first route after a pause
+    /// roughly 450ms. Paying that during speech takes it off the wait after
+    /// release. S1-mini is warmed for the same reason and goes idle longer,
+    /// because most dictations pass through without a rewrite. A dictation
+    /// released before this finishes waits for the remainder, which is work
+    /// its own route and rewrite would otherwise have done.
     /// See docs/investigations/2026-09-22-router-latency-and-benchmark-protocol.md.
     ///
     /// A reply that is not the acknowledgement means the request and reply
@@ -187,7 +189,7 @@ impl KevWorker {
         match parse_prepared(&line) {
             Ok(Prepared::Ready) => Ok(()),
             Ok(Prepared::Failed(message)) => {
-                Err(anyhow!("The worker could not prepare the router: {message}"))
+                Err(anyhow!("The worker could not prepare the models: {message}"))
             }
             Err(error) => Err(self.poison(format!(
                 "The inference worker answered a warm-up with something else ({error:#})"
