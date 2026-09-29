@@ -1,4 +1,7 @@
-# PrivacyFlow MVP
+# PrivacyFlow Rust prototype
+
+> **Archived.** This is the original Rust prototype of PrivacyFlow and is no longer developed.
+> The maintained app is [Fz77z/PrivacyFlow](https://github.com/Fz77z/PrivacyFlow).
 
 A macOS-first local dictation app. The current milestone is deliberately narrow:
 
@@ -57,7 +60,7 @@ PrivacyFlow can be built as a normal macOS application:
 ./scripts/build-app.sh
 ```
 
-This installs `/Applications/PrivacyFlow.app`.
+This installs `/Applications/PrivacyFlow Prototype.app`.
 
 Installing to a fixed location matters more than it looks.
 macOS grants Accessibility, Input Monitoring and Microphone permission per executable, so a binary that moves is treated as a different application and has to be granted them again.
@@ -71,7 +74,7 @@ The certificate has nothing to do with trust or distribution; it exists so succe
 ### Two permissions have to be added by hand
 
 PrivacyFlow prompts for the microphone and for nothing else.
-The other two must be added manually in System Settings, Privacy and Security, using the plus button to select `/Applications/PrivacyFlow.app`.
+The other two must be added manually in System Settings, Privacy and Security, using the plus button to select `/Applications/PrivacyFlow Prototype.app`.
 
 | Permission | Needed for | Symptom when missing |
 | --- | --- | --- |
@@ -94,7 +97,7 @@ Rebuilding PrivacyFlow with a different signature, which is what happened when i
 
 Toggling the switch off and on again does not fix this.
 That only changes the stored decision on a record that already fails to match.
-Select the entry, remove it with the minus button while it is still enabled, then add `/Applications/PrivacyFlow.app` again with the plus button, which writes a fresh record against the signature the app has now.
+Select the entry, remove it with the minus button while it is still enabled, then add `/Applications/PrivacyFlow Prototype.app` again with the plus button, which writes a fresh record against the signature the app has now.
 
 This presents as the app being unable to do the thing it has permission for.
 Insertion is the clearest case: the text reaches the clipboard, a manual paste works, the app reports a successful insert, and nothing arrives at the cursor.

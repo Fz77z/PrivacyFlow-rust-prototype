@@ -1,5 +1,9 @@
 #!/bin/bash
-# Assemble PrivacyFlow.app around the release binary and install it.
+# Assemble "PrivacyFlow Prototype.app" around the release binary and install it.
+#
+# The name and bundle identifier differ from the Swift PrivacyFlow app, so this
+# prototype installs beside that app and keeps its own permission grants
+# instead of replacing it.
 #
 # PrivacyFlow is installed to a stable path on purpose. macOS grants
 # Accessibility, Input Monitoring and Microphone per executable identity, so
@@ -7,8 +11,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAGE="$ROOT/target/PrivacyFlow.app"
-INSTALL="/Applications/PrivacyFlow.app"
+STAGE="$ROOT/target/PrivacyFlow Prototype.app"
+INSTALL="/Applications/PrivacyFlow Prototype.app"
 VERSION="$(awk -F'"' '/^version = /{print $2; exit}' "$ROOT/Cargo.toml")"
 
 # awk exits 0 when it matches nothing, so an empty VERSION would sail through

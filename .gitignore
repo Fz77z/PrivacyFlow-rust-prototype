@@ -1,4 +1,4 @@
-# Rust build output, including the staged PrivacyFlow.app and its icon set.
+# Rust build output, including the staged app bundle and its icon set.
 target/
 
 # Python caches left by the icon and cue scripts.

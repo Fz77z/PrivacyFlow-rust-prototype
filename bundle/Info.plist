@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>io.github.fz77z.privacyflow</string>
+    <string>io.github.fz77z.privacyflow.prototype</string>
     <key>CFBundleName</key>
-    <string>PrivacyFlow</string>
+    <string>PrivacyFlow Prototype</string>
     <key>CFBundleDisplayName</key>
-    <string>PrivacyFlow</string>
+    <string>PrivacyFlow Prototype</string>
     <key>CFBundleExecutable</key>
     <string>privacyflow</string>
     <key>CFBundleIconFile</key>
