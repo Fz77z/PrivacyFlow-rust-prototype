@@ -1,7 +1,27 @@
+# Rust build output, including the staged PrivacyFlow.app and its icon set.
 target/
-.DS_Store
-.superpowers/
+
+# Python caches left by the icon and cue scripts.
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Recorded speech must never be committed by accident.
+# The UI cue sounds are the only audio that belongs in the repository.
+*.wav
+!assets/sounds/*.wav
+
+# Local agent and tooling state.
+.claude/settings.local.json
+.superpowers/
+.playwright-mcp/
 
 # Worktrees for branches in progress live inside the repo.
 .worktrees/
+
+# Operating system and editor clutter.
+.DS_Store
+.idea/
+.vscode/
+*.swp
