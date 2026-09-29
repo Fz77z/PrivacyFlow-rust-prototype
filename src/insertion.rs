@@ -4,9 +4,6 @@
 //! Dictating twice in a row used to produce `out.Needs space`, because the
 //! transcript was pasted exactly as the router produced it and nothing looked
 //! at the destination. The rule here supplies the missing space.
-//!
-//! See `docs/investigations/2026-09-23-cursor-context-and-paste-spacing.md`
-//! for where the rule comes from and what was deliberately left out of it.
 
 /// Characters that close a clause and therefore want a space after them.
 /// Opening brackets are deliberately absent: `(` must stay welded to the word

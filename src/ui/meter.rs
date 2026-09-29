@@ -4,10 +4,9 @@
 /// The reported level is the raw RMS times eight, clamped to one, so this
 /// window is roughly -54 to -30 dBFS. That is set from this machine's own
 /// microphone, which is quiet: silent captures measured about -56 dBFS and
-/// whole dictations about -54 dBFS including their pauses (see
-/// docs/investigations/2026-09-23-silence-floor-false-refusals.md). A window
-/// placed for a typical microphone, starting at -48 dBFS, left speech here
-/// barely moving the bars. Hearing is logarithmic, so the window is too.
+/// whole dictations about -54 dBFS including their pauses. A window placed
+/// for a typical microphone, starting at -48 dBFS, left speech here barely
+/// moving the bars. Hearing is logarithmic, so the window is too.
 const QUIET_DB: f32 = -36.0;
 const LOUD_DB: f32 = -12.0;
 

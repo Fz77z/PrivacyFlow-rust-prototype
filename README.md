@@ -12,7 +12,7 @@ PrivacyFlow uses the existing sibling `../localflow-research` project directly:
 
 - ASR: `mlx-community/whisper-large-v3-turbo` through its existing `mlx-whisper` integration.
 - Router: `experiments/scaling_run/checkpoints/pool_300`, with the same `v3_operational` prompt, LoRA adapter, and pointer head used by the scaling report, served in bf16 on MPS rather than the report's fp32.
-  bf16 halves the router's memory, and is gated on never changing what a dictation produces rather than on exact probabilities; see `docs/investigations/2026-09-22-router-latency-and-benchmark-protocol.md`.
+  bf16 halves the router's memory, and is gated on never changing what a dictation produces rather than on exact probabilities.
 - Text processing: `superwhisper/s1-mini`, a 0.6B Qwen3 fine-tune that rewrites a raw ASR transcript as finished written text, run locally through transformers on MPS and kept resident beside the other two models.
 - Research log: the existing `data/shadow/utterances.jsonl` and `data/shadow/BATCHES.json` machinery. It records transcript, Kev route/probabilities/latency, rules prediction, ASR metadata, provenance, and batch.
 

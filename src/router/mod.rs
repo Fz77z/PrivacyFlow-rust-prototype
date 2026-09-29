@@ -172,7 +172,6 @@ impl KevWorker {
     /// because most dictations pass through without a rewrite. A dictation
     /// released before this finishes waits for the remainder, which is work
     /// its own route and rewrite would otherwise have done.
-    /// See docs/investigations/2026-09-22-router-latency-and-benchmark-protocol.md.
     ///
     /// A reply that is not the acknowledgement means the request and reply
     /// streams no longer line up, and every later dictation would receive
