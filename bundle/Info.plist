@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.privacy.dictation</string>
+    <string>io.github.fz77z.privacyflow</string>
     <key>CFBundleName</key>
     <string>PrivacyFlow</string>
     <key>CFBundleDisplayName</key>
