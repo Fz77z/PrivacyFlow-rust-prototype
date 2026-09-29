@@ -154,3 +154,6 @@ PrivacyFlow never quietly inserts the raw transcript when processing was suppose
 
 Every successfully transcribed utterance is still written through the existing shadow collector before insertion. A burned batch is rejected before it can be appended; PrivacyFlow reports the collection problem without silently creating or contaminating an evaluation batch.
 
+## License
+
+PrivacyFlow is released under the [MIT License](LICENSE).
